@@ -1,0 +1,4 @@
+.DS_Store
+datasets/
+models/*.h5
+__pycache__/
