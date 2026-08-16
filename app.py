@@ -1,160 +1,120 @@
 import streamlit as st
 import tensorflow as tf
 import numpy as np
+import nibabel as nib
 import cv2
-from PIL import Image
 import os
+import tempfile
 
-# Configure the Webpage
-st.set_page_config(page_title="MRI Analysis System", layout="wide", page_icon="🧠")
-
-st.title("🧠 Structural MRI Analysis System")
-st.markdown("Upload an MRI scan to instantly generate a diagnosis and an AI visual explanation.")
-
-# Sidebar Configuration
-st.sidebar.header("Analysis Configuration")
-task_selection = st.sidebar.radio("Select Diagnostic Task:", ["Brain Tumor Detection", "Alzheimer's Screening"])
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("**Powered by:**")
-st.sidebar.markdown("- DenseNet121 (Tumor Model)")
-st.sidebar.markdown("- EfficientNetB0 (Alzheimer's Model)")
-
-# Define Class Labels
-TUMOR_CLASSES = ['Glioma Tumor', 'Meningioma Tumor', 'No Tumor', 'Pituitary Tumor']
-ALZHEIMER_CLASSES = ['Mild Impairment', 'Moderate Impairment', 'No Impairment', 'Very Mild Impairment']
-
-# Smart Model Caching (So it doesn't reload the massive model on every click)
-@st.cache_resource
-def load_tumor_model():
-    return tf.keras.models.load_model('models/densenet_mri_model_ROBUST.h5')
+st.set_page_config(page_title="Autism Detection MRI", layout="wide")
+st.title("🧠 ABIDE Autism Detection & Explainability")
+st.markdown("Upload a raw 3D `.nii.gz` structural MRI scan. The engine will extract the central slices, run them through the pre-trained DenseNet121 model, and generate a Grad-CAM heatmap explaining its clinical decision.")
 
 @st.cache_resource
-def load_alzheimer_model():
-    return tf.keras.models.load_model('models/efficientnet_alzheimers_model_ULTIMATE.h5')
+def load_medical_model():
+    # Load the DenseNet model (compile=False because we only need it for inference)
+    return tf.keras.models.load_model("DenseNet121_Autism.h5", compile=False)
 
-model = None
-classes = []
+try:
+    model = load_medical_model()
+    st.sidebar.success("✅ DenseNet121 Model Loaded Successfully!")
+except Exception as e:
+    st.sidebar.error("❌ Model not found! Please ensure 'DenseNet121_Autism.h5' is downloaded from Google Drive and placed in this folder.")
+    st.stop()
 
-# Load the requested model dynamically
-if task_selection == "Brain Tumor Detection":
-    classes = TUMOR_CLASSES
-    if os.path.exists('models/densenet_mri_model_ROBUST.h5'):
-        model = load_tumor_model()
-    else:
-        st.error("⚠️ Tumor Model missing! Please download `densenet_mri_model_ROBUST.h5` into your `models/` folder.")
-else:
-    classes = ALZHEIMER_CLASSES
-    if os.path.exists('models/efficientnet_alzheimers_model_ULTIMATE.h5'):
-        model = load_alzheimer_model()
-    else:
-        st.error("⚠️ Alzheimer's Model missing! Please download `efficientnet_alzheimers_model_ULTIMATE.h5` into your `models/` folder.")
+def make_gradcam_heatmap(img_array, model, last_conv_layer_name="relu"):
+    """Generates the Grad-CAM Heatmap to explain the AI's decision."""
+    grad_model = tf.keras.models.Model(
+        [model.inputs], [model.get_layer(last_conv_layer_name).output, model.output]
+    )
 
-# --- GRAD-CAM FUNCTIONS ---
-def generate_tumor_gradcam(img_array, model):
-    # Tumor model is Functional (DenseNet121)
-    last_conv_layer_name = "relu" 
-    grad_model = tf.keras.models.Model([model.inputs], [model.get_layer(last_conv_layer_name).output, model.output])
-    
     with tf.GradientTape() as tape:
-        last_conv_output, preds = grad_model(img_array)
-        top_pred_index = tf.argmax(preds[0])
-        top_class_channel = preds[:, top_pred_index]
+        last_conv_layer_output, preds = grad_model(img_array)
+        class_channel = preds[:, 0]
 
-    grads = tape.gradient(top_class_channel, last_conv_output)
+    grads = tape.gradient(class_channel, last_conv_layer_output)
     pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-    last_conv_output = last_conv_output.numpy()[0]
-    pooled_grads = pooled_grads.numpy()
+    last_conv_layer_output = last_conv_layer_output[0]
+    heatmap = last_conv_layer_output @ pooled_grads[..., tf.newaxis]
+    heatmap = tf.squeeze(heatmap)
+    heatmap = tf.maximum(heatmap, 0) / tf.math.reduce_max(heatmap)
+    return heatmap.numpy()
+
+def display_gradcam(img_array, heatmap, alpha=0.4):
+    """Overlays the heatmap onto the original MRI slice."""
+    img = np.uint8(255 * img_array[0])
+    heatmap = np.uint8(255 * heatmap)
+    jet = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+    jet = cv2.cvtColor(jet, cv2.COLOR_BGR2RGB)
     
-    for i in range(pooled_grads.shape[-1]):
-        last_conv_output[:, :, i] *= pooled_grads[i]
+    superimposed_img = cv2.addWeighted(img, 1-alpha, jet, alpha, 0)
+    return superimposed_img
+
+uploaded_file = st.file_uploader("Upload 3D NIfTI Scan (.nii or .nii.gz)", type=["nii", "nii.gz"])
+
+if uploaded_file is not None:
+    st.info("Extracting 2D Slices from 3D Volume...")
+    
+    # Save uploaded file temporarily so nibabel can read it
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.nii.gz') as tmp:
+        tmp.write(uploaded_file.read())
+        tmp_path = tmp.name
         
-    heatmap = np.mean(last_conv_output, axis=-1)
-    heatmap = np.maximum(heatmap, 0)
-    if np.max(heatmap) != 0: heatmap /= np.max(heatmap)
-    return heatmap, preds[0]
-
-def generate_alzheimer_gradcam(img_array, model):
-    # Alzheimer's model is Nested Sequential (EfficientNetB0)
-    base_model = model.layers[0]
-    last_conv_layer_name = base_model.layers[-1].name
-    last_conv_model = tf.keras.Model(base_model.inputs, base_model.get_layer(last_conv_layer_name).output)
-    
-    classifier_input = tf.keras.Input(shape=last_conv_model.output.shape[1:])
-    x = classifier_input
-    for layer in model.layers[1:]: x = layer(x)
-    classifier_model = tf.keras.Model(classifier_input, x)
-    
-    with tf.GradientTape() as tape:
-        last_conv_output = last_conv_model(img_array)
-        tape.watch(last_conv_output)
-        preds = classifier_model(last_conv_output)
-        top_pred_index = tf.argmax(preds[0])
-        top_class_channel = preds[:, top_pred_index]
-
-    grads = tape.gradient(top_class_channel, last_conv_output)
-    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-    last_conv_output = last_conv_output.numpy()[0]
-    pooled_grads = pooled_grads.numpy()
-    
-    for i in range(pooled_grads.shape[-1]):
-        last_conv_output[:, :, i] *= pooled_grads[i]
+    try:
+        # Load 3D Volume
+        scan = nib.load(tmp_path).get_fdata()
+        cx, cy, cz = scan.shape[0]//2, scan.shape[1]//2, scan.shape[2]//2
         
-    heatmap = np.mean(last_conv_output, axis=-1)
-    heatmap = np.maximum(heatmap, 0)
-    if np.max(heatmap) != 0: heatmap /= np.max(heatmap)
-    return heatmap, preds[0]
-
-# --- MAIN UI ---
-uploaded_file = st.file_uploader("Select an MRI Scan (JPG/PNG)", type=["jpg", "png", "jpeg"])
-
-if uploaded_file is not None and model is not None:
-    col1, col2 = st.columns(2)
-    
-    # Process Image
-    image = Image.open(uploaded_file).convert('RGB')
-    img_array = np.array(image)
-    img_resized = cv2.resize(img_array, (224, 224))
-    
-    with col1:
-        st.subheader("Original MRI")
-        st.image(image, use_container_width=True)
+        # Extract slices
+        slices = {
+            'Axial (Top-Down)': scan[:, :, cz],
+            'Coronal (Front-Back)': scan[:, cy, :],
+            'Sagittal (Side)': scan[cx, :, :]
+        }
         
-    if st.button("Run AI Analysis", type="primary"):
-        with st.spinner(f"Analyzing for {task_selection}..."):
+        st.subheader("1. Extracted Slices")
+        cols = st.columns(3)
+        processed_slices = []
+        
+        for i, (name, img_data) in enumerate(slices.items()):
+            # Intensity Normalization
+            if np.max(img_data) != 0:
+                img_data = (img_data / np.max(img_data)) * 255.0
+            img_data = img_data.astype(np.uint8)
             
-            if task_selection == "Brain Tumor Detection":
-                # Tumors: Gaussian Blur + Rescale
-                processed_img = cv2.GaussianBlur(img_resized, (5, 5), 0)
-                input_tensor = np.expand_dims(processed_img / 255.0, axis=0)
-                heatmap, preds = generate_tumor_gradcam(input_tensor, model)
-            else:
-                # Alzheimer's: No Blur, No Rescale
-                input_tensor = np.expand_dims(img_resized, axis=0)
-                heatmap, preds = generate_alzheimer_gradcam(input_tensor, model)
+            # Resize to DenseNet's exact 224x224 requirement and convert to RGB
+            img_rgb = np.stack((img_data,)*3, axis=-1) 
+            img_rgb = cv2.resize(img_rgb, (224, 224))
+            processed_slices.append(img_rgb)
             
-            # Extract Results
-            top_pred_idx = np.argmax(preds)
-            diagnosis = classes[top_pred_idx]
-            confidence = preds[top_pred_idx] * 100
+            cols[i].image(img_rgb, caption=name, use_container_width=True)
             
-            # Generate Overlay
-            heatmap_resized = cv2.resize(heatmap, (img_array.shape[1], img_array.shape[0]))
-            heatmap_resized = np.uint8(255 * heatmap_resized)
-            heatmap_colored = cv2.applyColorMap(heatmap_resized, cv2.COLORMAP_JET)
-            
-            # Blend original with heatmap
-            img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-            overlay_bgr = cv2.addWeighted(img_bgr, 0.6, heatmap_colored, 0.4, 0)
-            overlay_rgb = cv2.cvtColor(overlay_bgr, cv2.COLOR_BGR2RGB)
-            
-            with col2:
-                st.subheader("Grad-CAM Explanation")
-                st.image(overlay_rgb, use_container_width=True)
+        st.subheader("2. AI Diagnosis & Explainability (Grad-CAM)")
+        
+        if st.button("Run DenseNet121 Analysis"):
+            with st.spinner("Analyzing brain structures..."):
+                # We analyze the Axial slice for the Grad-CAM demo
+                input_tensor = np.expand_dims(processed_slices[0] / 255.0, axis=0)
                 
-            st.success("Analysis Complete!")
-            
-            # Display Final Metrics
-            st.markdown("---")
-            st.markdown(f"### 🩺 **Diagnosis:** `{diagnosis}`")
-            st.markdown(f"### 📊 **Confidence:** `{confidence:.2f}%`")
+                # Run DenseNet Inference
+                prediction = model.predict(input_tensor)[0][0]
+                confidence = prediction if prediction > 0.5 else 1 - prediction
+                diagnosis = "Autism Spectrum (ASD)" if prediction > 0.5 else "Neurotypical (Control)"
+                color = "red" if prediction > 0.5 else "green"
+                
+                st.markdown(f"### Diagnosis: <span style='color:{color}'>{diagnosis}</span> ({confidence*100:.1f}% Confidence)", unsafe_allow_html=True)
+                
+                try:
+                    # Generate Grad-CAM Heatmap
+                    # The final conv layer in DenseNet121 before pooling is usually 'relu'
+                    heatmap = make_gradcam_heatmap(input_tensor, model, "relu")
+                    overlay = display_gradcam(input_tensor, heatmap)
+                    
+                    gc_cols = st.columns(2)
+                    gc_cols[0].image(processed_slices[0], caption="Original Axial Slice")
+                    gc_cols[1].image(overlay, caption="Grad-CAM (Where the AI looked)")
+                except Exception as e:
+                    st.warning(f"Grad-CAM Error: {e}")
+                    
+    finally:
+        os.remove(tmp_path)
