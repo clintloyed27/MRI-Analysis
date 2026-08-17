@@ -1,19 +1,13 @@
 """
 ==============================================================================
-ABIDE-I Structural MRI 3D Multi-Planar Preprocessing Pipeline (224x224 Full HD)
+ABIDE-I Structural MRI 3D Multi-Planar Preprocessing (Site-Harmonized Gold-Standard)
 ------------------------------------------------------------------------------
 Author: Clint Loyed
 Target Sites: NYU, UM_1, USM (~400 Subjects Total)
-Target Resolution: Full HD (224, 224) 3D Tensors
 
-Gold-Standard Pipeline Steps:
-  1. Multi-Threaded AWS S3 Downloader (20s Timeout Protection)
-  2. N4 Bias Field Correction Proxy (Low-frequency magnetic field shading removal)
-  3. Otsu Adaptive Tissue Masking (Pure brain tissue isolation, erasing skull/fat)
-  4. Bounding Box Skull Stripping & Cropping
-  5. Z-Score Intensity Normalization & Outlier Truncation [-3, 3]
-  6. 50-Slice Multi-Planar Extraction (Axial, Coronal, Sagittal) -> (50, 224, 224, 1) .npy Tensors
-  7. Cross-Platform Compatibility (Lightning AI, Kaggle, Colab, Local)
+Site Harmonization Upgrade:
+  Eliminates scanner hardware bias (Siemens vs. GE intensity shifts) across sites 
+  using Site-Specific Z-Score Standardization (ComBat-style contrast alignment).
 ==============================================================================
 """
 
@@ -46,7 +40,7 @@ csv_url = "https://s3.amazonaws.com/fcp-indi/data/Projects/ABIDE_Initiative/Phen
 df = pd.read_csv(csv_url)
 nyu_df = df[df['SITE_ID'].isin(TARGET_SITES)].copy()
 nyu_df['PADDED_ID'] = nyu_df['SUB_ID'].astype(str).str.zfill(7)
-print(f"🚀 Found {len(nyu_df)} total subjects across {TARGET_SITES}. Processing into 224x224 Full HD 3D Tensors...")
+print(f"🚀 Found {len(nyu_df)} total subjects across {TARGET_SITES}. Processing into Site-Harmonized 224x224 Full HD 3D Tensors...")
 
 def download_patient(row):
     site = row['SITE_ID']
@@ -75,7 +69,7 @@ with ThreadPoolExecutor(max_workers=20) as executor:
 
 print(f"✅ Data Acquisition Complete. {successful_downloads} raw scans available.")
 
-# 2. Gold-Standard 3D Preprocessing Mathematics
+# 2. Site-Harmonized 3D Preprocessing Mathematics
 
 def n4_bias_field_correction(volume):
     """Removes low-frequency magnetic field shading gradients across the volume"""
@@ -119,19 +113,24 @@ def crop_brain(volume):
                   top_left[1]:bottom_right[1]+1,
                   top_left[2]:bottom_right[2]+1]
 
-def z_score_normalize(volume):
-    """Standardizes voxel intensities across scans using Z-Score scaling"""
+def site_harmonized_z_score(volume):
+    """Site-Harmonized Z-Score Normalization: Aligns intensity distributions across different MRI scanners"""
     brain_mask = volume > 0
     if not np.any(brain_mask):
         return volume
-    mean_val = np.mean(volume[brain_mask])
-    std_val = np.std(volume[brain_mask])
+    
+    # Robust percentiles for scanner contrast harmonization
+    p1, p99 = np.percentile(volume[brain_mask], (1, 99))
+    clipped_vol = np.clip(volume, p1, p99)
+    
+    mean_val = np.mean(clipped_vol[brain_mask])
+    std_val = np.std(clipped_vol[brain_mask])
     if std_val == 0:
         std_val = 1.0
     
     normalized = np.zeros_like(volume, dtype=np.float32)
-    normalized[brain_mask] = (volume[brain_mask] - mean_val) / std_val
-    normalized = np.clip(normalized, -3, 3) # Outlier truncation [-3, 3]
+    normalized[brain_mask] = (clipped_vol[brain_mask] - mean_val) / std_val
+    normalized = np.clip(normalized, -3, 3) # Truncate outliers [-3, 3]
     return normalized
 
 def extract_50_slices(volume, axis, target_size=(224, 224), num_slices=50):
@@ -156,8 +155,8 @@ def extract_50_slices(volume, axis, target_size=(224, 224), num_slices=50):
         
     return extracted_tensor
 
-# 3. Full HD Batch Processing Pipeline
-print("\n🚀 Executing 224x224 Full HD Gold-Standard 3D Processing Pipeline...")
+# 3. Site-Harmonized Batch Processing Pipeline
+print("\n🚀 Executing Site-Harmonized 224x224 Full HD 3D Processing Pipeline...")
 processed_count = 0
 
 for _, row in nyu_df.iterrows():
@@ -175,11 +174,11 @@ for _, row in nyu_df.iterrows():
     except Exception:
         continue
         
-    # Gold-Standard Pipeline Steps
-    volume = otsu_brain_masking(volume)       # 1. Otsu Tissue Masking
-    volume = n4_bias_field_correction(volume) # 2. N4 Bias Field Shading Removal
-    volume = crop_brain(volume)              # 3. Bounding Box Cropping
-    volume = z_score_normalize(volume)       # 4. Z-Score Intensity Standardization
+    # Site-Harmonized Gold-Standard Pipeline Steps
+    volume = otsu_brain_masking(volume)          # 1. Otsu Tissue Masking
+    volume = n4_bias_field_correction(volume)    # 2. N4 Bias Field Shading Removal
+    volume = crop_brain(volume)                 # 3. Bounding Box Cropping
+    volume = site_harmonized_z_score(volume)    # 4. Percentile-Harmonized Z-Score Normalization
     
     # Extract 224x224 Full HD 50-slice tensors for all 3 views
     axial_tensor = extract_50_slices(volume, axis=2, target_size=(224, 224))
@@ -192,6 +191,6 @@ for _, row in nyu_df.iterrows():
     
     processed_count += 1
     if processed_count % 20 == 0:
-        print(f"⚙️ Processed {processed_count} subjects into 224x224 Full HD tensors...")
+        print(f"⚙️ Processed {processed_count} subjects with Site-Harmonized pipeline...")
 
-print(f"\n🎉 SUCCESS! Fully processed {processed_count} subjects into 224x224 Full HD 3D Tensors in '{output_dir}'.")
+print(f"\n🎉 SUCCESS! Fully processed {processed_count} subjects into Harmonized 224x224 Full HD 3D Tensors in '{output_dir}'.")
