@@ -5,15 +5,20 @@ ABIDE-I 3D Hierarchical Multi-Planar PyTorch Neural Network (Resume Mode + VRAM 
 Author: Clint Loyed
 Target Sites: NYU, UM_1, USM (~400 Subjects Total)
 Smart Features:
-  1. Resume Checkpoints: Skips existing saved fold models (preserves Fold 1 75.95% & Fold 2 62.03%)
-  2. GPU VRAM Preloading: 100x speedup for remaining folds
-  3. num_workers = 0: Zero IPC deadlock stalls
-  4. Early Stopping (Patience = 10): Prevents over-fitting
+  1. Resume Checkpoints: Skips existing saved fold models (preserves Folds 1, 2, 3)
+  2. Memory Safe (Batch Size = 4 + CUDA Cache Flushing + expandable_segments:True)
+  3. GPU VRAM Preloading: 100x speedup for remaining folds
+  4. num_workers = 0: Zero IPC deadlock stalls
+  5. Early Stopping (Patience = 10): Prevents over-fitting
 ==============================================================================
 """
 
 import os
 import sys
+
+# Prevent PyTorch CUDA memory fragmentation
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
 import numpy as np
 import pandas as pd
 import torch
@@ -34,7 +39,7 @@ log(f"1. Initializing PyTorch 3D Engine on Device: {device}")
 if device.type == 'cuda':
     log(f"🚀 NATIVE GPU ACCELERATOR ACTIVE: {torch.cuda.get_device_name(0)}")
 
-GLOBAL_BATCH_SIZE = 16 
+GLOBAL_BATCH_SIZE = 4 # Memory-safe batch size for 224x224 3D multi-view tensors
 EPOCHS = 50
 PATIENCE = 10
 
@@ -208,11 +213,14 @@ log("\n🚀 4. Initiating PyTorch 5-Fold Stratified Cross Validation Protocol...
 skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 fold_scores = []
 
-# Hardcoded fallback values for previously completed folds if model file exists
-known_fold_peaks = {1: 0.7595, 2: 0.6203}
+known_fold_peaks = {1: 0.7595, 2: 0.6203, 3: 0.6329}
 
 for fold, (train_idx, val_idx) in enumerate(skf.split(X_ax, y), 1):
     save_path = os.path.join(base_dir, f'PyTorch_3D_Fold{fold}.pt')
+    
+    # Flush GPU cache before starting fold
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
     
     # SMART RESUME: If fold is already completed, evaluate saved weights instantly!
     if os.path.exists(save_path):
