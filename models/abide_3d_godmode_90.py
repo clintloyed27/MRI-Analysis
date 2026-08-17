@@ -6,12 +6,13 @@ Author: Clint Loyed
 Target Sites: NYU, UM_1, USM (~400 Subjects Total)
 Dataset Split: Stratified Single 80% Train / 20% Test Split
 
-Bulletproof Memory & High Performance Enhancements:
-  1. Auto GPU Memory Reclamation (gc.collect() + torch.cuda.empty_cache())
-  2. FP16 Mixed Precision Training (torch.cuda.amp.autocast) for 2x Speed & 50% Memory Savings
-  3. Batch Size = 4 (Prevents VRAM Memory Spikes)
-  4. Higher Learning Rate (3e-4) with Cosine Annealing (T_max = 60)
-  5. Automated Peak Model Checkpointing (GodMode_3D_Best.pt)
+AMP-Safe & Bulletproof Enhancements:
+  1. Raw Logits + F.binary_cross_entropy_with_logits (100% AMP Autocast Safe)
+  2. Auto GPU Memory Reclamation (gc.collect() + torch.cuda.empty_cache())
+  3. FP16 Mixed Precision Training for 2x Speed & 50% Memory Savings
+  4. Batch Size = 4 (Prevents VRAM Memory Spikes)
+  5. Learning Rate (3e-4) with Cosine Annealing
+  6. Automated Peak Model Checkpointing (GodMode_3D_Best.pt)
 ==============================================================================
 """
 
@@ -48,7 +49,7 @@ log(f"1. PyTorch Engine Device: {device}")
 if device.type == 'cuda':
     log(f"🚀 NATIVE A100 GPU ACTIVE: {torch.cuda.get_device_name(0)}")
 
-GLOBAL_BATCH_SIZE = 4 # Safe Memory Footprint
+GLOBAL_BATCH_SIZE = 4
 EPOCHS = 60
 
 # Output Directories
@@ -204,7 +205,7 @@ class GodMode3DCNN(nn.Module):
         self.fc1 = nn.Linear(256 * 3, 256)
         self.act = nn.GELU()
         self.dropout = nn.Dropout(0.5)
-        self.out = nn.Linear(256, 1)
+        self.out = nn.Linear(256, 1) # Outputs raw logits for AMP safety
 
     def forward(self, ax, cor, sag):
         f_ax = self.ax_net(ax)
@@ -214,17 +215,18 @@ class GodMode3DCNN(nn.Module):
         z = torch.cat([f_ax, f_cor, f_sag], dim=1)
         z = self.ln(z)
         z = self.dropout(self.act(self.fc1(z)))
-        return torch.sigmoid(self.out(z)).squeeze(-1)
+        return self.out(z).squeeze(-1) # Raw Logits
 
-class BinaryFocalLoss(nn.Module):
+class AMPBinaryFocalLoss(nn.Module):
     def __init__(self, gamma=2.0, alpha=0.25):
         super().__init__()
         self.gamma = gamma
         self.alpha = alpha
 
-    def forward(self, preds, targets):
-        bce = F.binary_cross_entropy(preds, targets, reduction='none')
-        p_t = targets * preds + (1 - targets) * (1 - preds)
+    def forward(self, logits, targets):
+        bce = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+        probs = torch.sigmoid(logits)
+        p_t = targets * probs + (1 - targets) * (1 - probs)
         alpha_t = targets * self.alpha + (1 - targets) * (1 - self.alpha)
         focal_loss = alpha_t * (1 - p_t) ** self.gamma * bce
         return focal_loss.mean()
@@ -241,11 +243,10 @@ train_loader = DataLoader(train_dataset, batch_size=GLOBAL_BATCH_SIZE, shuffle=T
 test_loader = DataLoader(test_dataset, batch_size=GLOBAL_BATCH_SIZE, shuffle=False, num_workers=0)
 
 model = GodMode3DCNN().to(device)
-criterion = BinaryFocalLoss()
+criterion = AMPBinaryFocalLoss()
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-3)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
 
-# Automatic Mixed Precision GradScaler
 scaler = torch.cuda.amp.GradScaler(enabled=(device.type == 'cuda'))
 
 best_test_acc = 0.0
@@ -261,8 +262,8 @@ for epoch in range(1, EPOCHS + 1):
     for a, c, s, targets in train_loader:
         optimizer.zero_grad()
         with torch.cuda.amp.autocast(enabled=(device.type == 'cuda')):
-            outputs = model(a, c, s)
-            loss = criterion(outputs, targets)
+            logits = model(a, c, s)
+            loss = criterion(logits, targets)
             
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -277,9 +278,10 @@ for epoch in range(1, EPOCHS + 1):
     with torch.no_grad():
         for a, c, s, targets in test_loader:
             with torch.cuda.amp.autocast(enabled=(device.type == 'cuda')):
-                outputs = model(a, c, s)
-            test_probs.extend(outputs.cpu().numpy())
-            test_preds.extend((outputs > 0.5).cpu().numpy())
+                logits = model(a, c, s)
+                probs = torch.sigmoid(logits)
+            test_probs.extend(probs.cpu().numpy())
+            test_preds.extend((probs > 0.5).cpu().numpy())
             test_targets.extend(targets.cpu().numpy())
             
     test_acc = accuracy_score(test_targets, test_preds)
