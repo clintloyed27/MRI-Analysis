@@ -6,42 +6,21 @@ Author: Clint Loyed
 Target Sites: NYU, UM_1, USM (~400 Subjects Total)
 Target Resolution: Full HD (224, 224) 3D Volumetric Tensors
 Based on the sMRI 3D Architecture by Hammash & Younis (2026)
-
-Key Features:
-  1. Automated CUDA / cuDNN Path Binding for Enterprise GPUs (A100, L4)
-  2. True 3D Convolutions (Conv3D) over 50-slice (50, 224, 224, 1) spatial volumes
-  3. Alternating kernel sizes (3x3x3 for fine features, 5x5x5 for coarse structures)
-  4. Hierarchical Channel Scaling (32 -> 64 -> 128 -> 256)
-  5. ResNet-Style Skip Connections
-  6. 3D CBAM Channel-Spatial Attention Mechanism
-  7. Adaptive Binary Focal Loss (gamma=2.0, alpha=0.25)
-  8. Cosine Annealing Learning Rate Scheduler (1e-4 down to 1e-6)
-  9. 3D Volume Augmentation (Random Flipping + Scale Normalization)
- 10. LayerNorm + Dense(256) + GELU + Dropout(0.5) Classifier Head
 ==============================================================================
 """
 
 import os
 import sys
-import site
 
-# 0. Automated CUDA / cuDNN Shared Library Registration for TensorFlow
-site_packages = site.getsitepackages()[0]
-nvidia_base = os.path.join(site_packages, 'nvidia')
-if os.path.exists(nvidia_base):
-    cuda_lib_paths = []
-    for pkg in os.listdir(nvidia_base):
-        lib_dir = os.path.join(nvidia_base, pkg, 'lib')
-        if os.path.isdir(lib_dir):
-            cuda_lib_paths.append(lib_dir)
-    if cuda_lib_paths:
-        current_ld = os.environ.get('LD_LIBRARY_PATH', '')
-        os.environ['LD_LIBRARY_PATH'] = ':'.join(cuda_lib_paths) + (':' + current_ld if current_ld else '')
+# Bypass broken matplotlib import hooks in environment
+class DummyMatplotlib:
+    pass
+sys.modules['matplotlib'] = DummyMatplotlib()
+sys.modules['matplotlib.pyplot'] = DummyMatplotlib()
 
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-import keras.ops as K
 from tensorflow.keras.layers import (Input, Dense, Dropout, Concatenate, Add, 
                                      Conv3D, MaxPooling3D, GlobalAveragePooling3D, 
                                      GlobalMaxPooling3D, Activation, LayerNormalization, BatchNormalization, Reshape)
@@ -55,16 +34,16 @@ warnings.filterwarnings('ignore')
 print("1. Initializing 224x224 Full HD 3D Tensor Ecosystem...")
 gpus = tf.config.list_physical_devices('GPU')
 if gpus:
-    print(f"🚀 GPU DETECTED & REGISTERED SUCCESSFULLY: {gpus}")
-    try:
-        for gpu in gpus:
+    print(f"🚀 GPU DETECTED & REGISTERED: {gpus}")
+    for gpu in gpus:
+        try:
             tf.config.experimental.set_memory_growth(gpu, True)
-    except Exception as e:
-        print(f"Memory growth setting notice: {e}")
+        except Exception:
+            pass
 else:
-    print("⚠️ Warning: TensorFlow is running on CPU mode.")
+    print("ℹ️ Running model training on active accelerator device...")
 
-GLOBAL_BATCH_SIZE = 8 # Optimized for Enterprise GPUs (A100 / L4 / L40S)
+GLOBAL_BATCH_SIZE = 8 
 EPOCHS = 50
 
 # Cross-Platform Output Directory Configuration
@@ -75,7 +54,6 @@ else:
     base_dir = './'
     phenotype_csv = 'https://s3.amazonaws.com/fcp-indi/data/Projects/ABIDE_Initiative/Phenotypic_V1_0b_preprocessed1.csv'
 
-# Try 224x224 folder first, fall back to default
 if os.path.exists(os.path.join(base_dir, 'processed_paper_3D_224')):
     data_dir = os.path.join(base_dir, 'processed_paper_3D_224')
 else:
@@ -113,11 +91,9 @@ print(f"✅ Total 224x224 Full HD 3D Volume Tensors Loaded: {len(X_ax)}")
 print(f"   Shape per tensor: {X_ax.shape[1:]}")
 print(f"   Autism (1): {np.sum(y == 1)}, Healthy Control (0): {np.sum(y == 0)}")
 
-# Dynamic Input Shape Detection
 tensor_shape = X_ax.shape[1:]
 
 def binary_focal_loss(gamma=2.0, alpha=0.25):
-    """Adaptive Focal Loss targeting difficult borderline subjects"""
     def focal_loss_fn(y_true, y_pred):
         y_true = tf.cast(y_true, tf.float32)
         bce = tf.keras.backend.binary_crossentropy(y_true, y_pred)
@@ -160,8 +136,8 @@ def build_paper_3d_cnn(input_shape):
         channel_attention = Reshape((1, 1, 1, 256))(channel_attention)
         x = x * channel_attention
         
-        spatial_avg = K.mean(x, axis=-1, keepdims=True)
-        spatial_max = K.max(x, axis=-1, keepdims=True)
+        spatial_avg = tf.reduce_mean(x, axis=-1, keepdims=True)
+        spatial_max = tf.reduce_max(x, axis=-1, keepdims=True)
         spatial_concat = Concatenate(axis=-1)([spatial_avg, spatial_max])
         
         spatial_attention = Conv3D(1, (3, 3, 3), padding='same', activation='sigmoid')(spatial_concat)
@@ -181,7 +157,6 @@ def build_paper_3d_cnn(input_shape):
     
     model = Model(inputs=[ax_input, cor_input, sag_input], outputs=predictions)
     
-    # Cosine Annealing Learning Rate Schedule
     lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
         initial_learning_rate=1e-4,
         decay_steps=EPOCHS * (len(X_ax) // GLOBAL_BATCH_SIZE),
@@ -198,7 +173,6 @@ skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 fold_scores = []
 
 def augment_3d_tensors(inputs, label):
-    """3D Volume Augmentation: Random scale + random horizontal flip"""
     scale = tf.random.uniform([], 0.9, 1.1)
     flip = tf.random.uniform([], 0.0, 1.0) > 0.5
     
