@@ -27,7 +27,7 @@ from tensorflow.keras.layers import (Input, Dense, Dropout, Concatenate, Add,
                                      GlobalMaxPooling3D, Activation, LayerNormalization, BatchNormalization, Reshape)
 from tensorflow.keras.models import Model
 from sklearn.model_selection import StratifiedKFold
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import accuracy_score
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -48,13 +48,15 @@ X_ax, X_cor, X_sag, y = [], [], [], []
 
 for patient_id in os.listdir(data_dir):
     folder_path = os.path.join(data_dir, patient_id)
-    if not os.path.isdir(folder_path) or patient_id not in label_dict: continue
+    if not os.path.isdir(folder_path) or patient_id not in label_dict:
+        continue
         
     try:
         ax = np.load(os.path.join(folder_path, "axial_50.npy"))
         cor = np.load(os.path.join(folder_path, "coronal_50.npy"))
         sag = np.load(os.path.join(folder_path, "sagittal_50.npy"))
-    except Exception: continue
+    except Exception:
+        continue
         
     X_ax.append(ax)
     X_cor.append(cor)

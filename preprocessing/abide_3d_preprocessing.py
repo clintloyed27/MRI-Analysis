@@ -44,13 +44,15 @@ def download_patient(row):
     url = f"https://s3.amazonaws.com/fcp-indi/data/Projects/ABIDE_Initiative/RawData/{site}/{pid}/session_1/anat_1/mprage.nii.gz"
     dest = os.path.join(raw_dir, f"ABIDE_{pid}.nii.gz")
     
-    if os.path.exists(dest): return True
+    if os.path.exists(dest):
+        return True
     try:
         with urllib.request.urlopen(url, timeout=20) as response, open(dest, 'wb') as out_file:
             out_file.write(response.read())
         return True
     except Exception:
-        if os.path.exists(dest): os.remove(dest)
+        if os.path.exists(dest):
+            os.remove(dest)
         return False
 
 print("📥 Initializing 20-thread AWS S3 Downloader...")
@@ -58,7 +60,8 @@ successful_downloads = 0
 with ThreadPoolExecutor(max_workers=20) as executor:
     futures = {executor.submit(download_patient, row): row['PADDED_ID'] for _, row in nyu_df.iterrows()}
     for future in as_completed(futures):
-        if future.result(): successful_downloads += 1
+        if future.result():
+            successful_downloads += 1
 
 print(f"✅ Data Acquisition Complete. {successful_downloads} raw scans available.")
 
@@ -67,7 +70,8 @@ def crop_brain(volume):
     """Bounding Box Skull Stripping: Removes empty background space around brain"""
     mask = volume > 0
     coords = np.array(np.nonzero(mask))
-    if coords.size == 0: return volume
+    if coords.size == 0:
+        return volume
     top_left = np.min(coords, axis=1)
     bottom_right = np.max(coords, axis=1)
     return volume[top_left[0]:bottom_right[0]+1,
@@ -77,10 +81,12 @@ def crop_brain(volume):
 def z_score_normalize(volume):
     """Standardizes voxel intensities across scans using Z-Score scaling"""
     brain_mask = volume > 0
-    if not np.any(brain_mask): return volume
+    if not np.any(brain_mask):
+        return volume
     mean_val = np.mean(volume[brain_mask])
     std_val = np.std(volume[brain_mask])
-    if std_val == 0: std_val = 1.0
+    if std_val == 0:
+        std_val = 1.0
     
     normalized = np.zeros_like(volume, dtype=np.float32)
     normalized[brain_mask] = (volume[brain_mask] - mean_val) / std_val
@@ -97,9 +103,12 @@ def extract_50_slices(volume, axis, target_size=(128, 128), num_slices=50):
     extracted_tensor = np.zeros((num_slices, target_size[0], target_size[1], 1), dtype=np.float32)
     
     for i, idx in enumerate(slices_idx):
-        if axis == 0:   slice_data = volume[idx, :, :] # Sagittal
-        elif axis == 1: slice_data = volume[:, idx, :] # Coronal
-        else:           slice_data = volume[:, :, idx] # Axial
+        if axis == 0:
+            slice_data = volume[idx, :, :] # Sagittal
+        elif axis == 1:
+            slice_data = volume[:, idx, :] # Coronal
+        else:
+            slice_data = volume[:, :, idx] # Axial
             
         resized = cv2.resize(slice_data, target_size, interpolation=cv2.INTER_CUBIC)
         extracted_tensor[i, :, :, 0] = resized
@@ -114,14 +123,16 @@ for _, row in nyu_df.iterrows():
     pid = row['PADDED_ID']
     nifti_path = os.path.join(raw_dir, f"ABIDE_{pid}.nii.gz")
     
-    if not os.path.exists(nifti_path): continue
+    if not os.path.exists(nifti_path):
+        continue
     out_folder = os.path.join(output_dir, pid)
     os.makedirs(out_folder, exist_ok=True)
     
     try:
         img = nib.load(nifti_path)
         volume = img.get_fdata()
-    except Exception: continue
+    except Exception:
+        continue
         
     volume = crop_brain(volume)
     volume = z_score_normalize(volume)
