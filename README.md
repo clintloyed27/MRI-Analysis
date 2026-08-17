@@ -1,56 +1,46 @@
 # 🧠 3D Multi-Planar Structural MRI Deep Learning Framework for Autism Spectrum Disorder (ASD) Classification
 
-A state-of-the-art 3D Volumetric Deep Learning system for classifying Autism Spectrum Disorder (ASD) from T1-weighted Structural Magnetic Resonance Imaging (sMRI) scans on the **ABIDE-I NYU Cohort**.
+A state-of-the-art 3D Volumetric Deep Learning system for classifying Autism Spectrum Disorder (ASD) from T1-weighted Structural Magnetic Resonance Imaging (sMRI) scans on the **ABIDE-I Dataset**.
 
 Replicating and adapting the methodology of **Hammash & Younis (2026)**, this repository implements genuine **3D Convolutions (`Conv3D`)** across three orthogonal anatomical views (Axial, Coronal, Sagittal) with 3D CBAM Attention and Adaptive Focal Loss.
 
 ---
 
-## 📊 Experimental Results (Stratified 5-Fold Cross-Validation)
+## 📊 Preserved Benchmark Models & Results
 
-| Evaluation Protocol | Dataset | Accuracy Metric | Gain over 2D Baseline |
+| Model File | Dataset / Sites | Specs & Features | Peak Validation Accuracy |
 | :--- | :--- | :--- | :--- |
-| **2D Single-View Baseline** | NYU (1 Slice) | **56.25%** | Baseline |
-| **2.5D Multi-Site Run** | ABIDE (3-Slice RGB Stack) | **63.62%** | +7.37 pp |
-| **3D Multi-Planar CV (Average)** | **NYU (50 Slices, 3-View)** | **69.59%** | **+13.34 pp** |
-| **3D Multi-Planar CV (Fold 5 Peak)** | **NYU (50 Slices, 3-View)** | **75.00%** | **+18.75 pp** |
-
-### Per-Fold Breakdown (5-Fold Stratified CV)
-* **Fold 1:** `70.27%`
-* **Fold 2:** `67.57%`
-* **Fold 3:** `64.86%`
-* **Fold 4:** `70.27%`
-* **Fold 5:** **`75.00%` (Peak Result)**
-* 🌟 **Final 5-Fold Average Accuracy:** **`69.59%`**
+| **[`models/abide_3d_hierarchical_cnn_pytorch.py`](models/abide_3d_hierarchical_cnn_pytorch.py)** | **Multi-Site (NYU + UM_1 + USM)** <br> $N=395$ Subjects | PyTorch 3D Conv3D CBAM + GPU VRAM Preload + Full HD 224x224 (50 Slices) | **`75.95%` (Fold 1 Peak)** 🔥 |
+| **[`models/abide_3d_hierarchical_cnn.py`](models/abide_3d_hierarchical_cnn.py)** | **Single-Site (NYU Alone)** <br> $N=184$ Subjects | Keras/TensorFlow 3D Conv3D CBAM + 128x128 / 224x224 | **`75.00%` (Fold 5 Peak)** 🌟 |
 
 ---
 
-## 🔬 Dataset Overview (ABIDE-I NYU Cohort)
+## 🔬 Dataset Overview (ABIDE-I Multi-Site & NYU Cohorts)
 
-* **Source Repository:** Autism Brain Imaging Data Exchange I (ABIDE-I).
-* **Scanner Site:** NYU Langone Medical Center ($N=184$ subjects).
-* **Class Distribution:**
-  * **Autism Spectrum Disorder (ASD):** 79 Subjects (42.93%)
-  * **Healthy Control (HC):** 105 Subjects (57.07%)
-* **Significance:** Near-equal ~43/57 balance eliminates majority-class label bias, ensuring metrics reflect genuine neuroanatomical feature discriminability.
+* **Multi-Site Cohort (`NYU`, `UM_1`, `USM`):** $N = 395$ Total Subjects
+  * **Autism Spectrum Disorder (ASD):** 192 Subjects (48.6%)
+  * **Healthy Control (HC):** 203 Subjects (51.4%)
+* **Single-Site Cohort (`NYU` Alone):** $N = 184$ Total Subjects
+  * **Autism Spectrum Disorder (ASD):** 79 Subjects (42.9%)
+  * **Healthy Control (HC):** 105 Subjects (57.1%)
 
 ---
 
 ## ⚙️ Preprocessing & Model Architecture
 
 ### 1. Preprocessing Pipeline (`preprocessing/abide_3d_preprocessing.py`)
-* **Bounding Box Skull Stripping:** Crops non-zero voxel coordinates to eliminate uninformative background air.
-* **Z-Score Intensity Normalization:** Rescales voxel brightness per scan: $I_{\text{norm}} = (I_{\text{brain}} - \mu)/\sigma$, with outlier truncation at $[-3\sigma, +3\sigma]$.
-* **Multi-Planar 50-Slice Extraction:** Extracts 50 consecutive middle slices for Axial (Z-axis), Coronal (Y-axis), and Sagittal (X-axis) physical planes into 3D NumPy arrays `(50, 128, 128, 1)`.
+* **Otsu Adaptive Brain Masking:** Erases non-brain tissue, skull, and scalp fat.
+* **N4 Bias Field Correction:** Removes spatial magnetic field shading gradients.
+* **Z-Score Intensity Normalization:** Rescales voxel brightness per scan: $I_{\text{norm}} = (I_{\text{brain}} - \mu)/\sigma$.
+* **Multi-Planar 50-Slice Extraction:** Extracts 50 middle slices for Axial (Z-axis), Coronal (Y-axis), and Sagittal (X-axis) physical planes into 3D tensors `(50, 224, 224, 1)`.
 
-### 2. Neural Network Architecture (`models/abide_3d_hierarchical_cnn.py`)
+### 2. Neural Network Architecture (`models/abide_3d_hierarchical_cnn_pytorch.py`)
 * **Volumetric Engine:** Genuine `Conv3D` layers operating on 50-slice spatial volumes.
 * **Alternating Kernel Strategy:** Alternates $3 \times 3 \times 3$ kernels (fine gyri/sulci) with $5 \times 5 \times 5$ kernels (coarse lateral ventricles/cerebellum).
 * **Hierarchical Scaling:** $32 \rightarrow 64 \rightarrow 128 \rightarrow 256$ channel progression.
-* **ResNet Skip Connections:** Residual addition blocks (`Conv3D + BatchNorm + Activation + Add`) preserve gradient flow across deep volumetric stages.
+* **ResNet Skip Connections:** Residual addition blocks preserve gradient flow across deep volumetric stages.
 * **3D CBAM Attention:** Channel and 3D Spatial attention modules dynamically isolate ASD-correlated neuroanatomical biomarkers.
 * **Adaptive Focal Loss:** Binary Focal Cross-Entropy ($\gamma=2.0, \alpha=0.25$) forces the network to focus on hard borderline cases.
-* **MLP Classifier Head:** `LayerNormalization` $\rightarrow$ `Dense(256)` $\rightarrow$ `GELU` $\rightarrow$ `Dropout(0.5)` $\rightarrow$ `Dense(1, activation='sigmoid')`.
 
 ---
 
@@ -60,13 +50,11 @@ Replicating and adapting the methodology of **Hammash & Younis (2026)**, this re
 ```bash
 python preprocessing/abide_3d_preprocessing.py
 ```
-*(Downloads the NYU NIfTI files from AWS S3, crops the brain, normalizes intensities, and exports 50-slice 3D `.npy` tensors to `/kaggle/working/processed_paper_3D/`)*
 
-### Step 2: Run 3D Multi-Planar 5-Fold Training
+### Step 2: Run Multi-Site PyTorch 3D Training (Peak 75.95%)
 ```bash
-python models/abide_3d_hierarchical_cnn.py
+python models/abide_3d_hierarchical_cnn_pytorch.py
 ```
-*(Loads the 3D `.npy` tensors, constructs the 3-Input Conv3D CBAM network, and executes Stratified 5-Fold Cross Validation)*
 
 ---
 
@@ -75,12 +63,13 @@ python models/abide_3d_hierarchical_cnn.py
 ```text
 MRI-Analysis/
 ├── preprocessing/
-│   └── abide_3d_preprocessing.py      # Automated AWS S3 downloader & 3D 50-slice multi-planar tensor generator
+│   └── abide_3d_preprocessing.py               # Multi-site AWS S3 downloader & Full HD 224x224 3D tensor extractor
 ├── models/
-│   └── abide_3d_hierarchical_cnn.py   # True 3D Hierarchical Conv3D CBAM network with 5-Fold Stratified CV
+│   ├── abide_3d_hierarchical_cnn_pytorch.py    # Multi-site (NYU+UM_1+USM) PyTorch 3D Conv3D CBAM Model (Peak: 75.95%)
+│   └── abide_3d_hierarchical_cnn.py            # NYU Single-site 3D Conv3D CBAM Model (Peak: 75.00%)
 ├── report/
-│   └── 3D_MultiPlanar_ASD_Research_Report.md  # Detailed research report, methodology, and fold results
-└── README.md                          # Repository documentation
+│   └── 3D_MultiPlanar_ASD_Research_Report.md   # Research report & methodology
+└── README.md                                   # Repository documentation
 ```
 
 ---
