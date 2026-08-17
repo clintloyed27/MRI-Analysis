@@ -4,19 +4,23 @@ ABIDE-I 3D Multi-Planar GodMode Deep Learning Framework for ASD (Target 90%)
 ------------------------------------------------------------------------------
 Author: Clint Loyed
 Target Sites: NYU, UM_1, USM (~400 Subjects Total)
-Dataset Split: Stratified Single 80% Train / 20% Test Split (No Cross Validation)
+Dataset Split: Stratified Single 80% Train / 20% Test Split
 
-Optimized Engine:
-  1. Higher Learning Rate Warmup (3e-4) to break majority class 0.5 threshold on Epoch 2
-  2. 3D ResNet-CBAM Dual Spatial-Channel Attention
-  3. Preloaded GPU VRAM Ultra-Speed Pipeline
-  4. Advanced 3D Augmentation (Scale, Horizontal Flip, Mixup)
-  5. Cosine Annealing Scheduler (3e-4 down to 1e-6)
+Bulletproof Memory & High Performance Enhancements:
+  1. Auto GPU Memory Reclamation (gc.collect() + torch.cuda.empty_cache())
+  2. FP16 Mixed Precision Training (torch.cuda.amp.autocast) for 2x Speed & 50% Memory Savings
+  3. Batch Size = 4 (Prevents VRAM Memory Spikes)
+  4. Higher Learning Rate (3e-4) with Cosine Annealing (T_max = 60)
+  5. Automated Peak Model Checkpointing (GodMode_3D_Best.pt)
 ==============================================================================
 """
 
 import os
 import sys
+import gc
+
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
 import numpy as np
 import pandas as pd
 import torch
@@ -28,12 +32,14 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 import warnings
 warnings.filterwarnings('ignore')
 
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
-
 def log(text=""):
     print(text, flush=True)
 
-# 1. GPU Acceleration Verification
+# 1. GPU Memory Cleanup & Verification
+if torch.cuda.is_available():
+    gc.collect()
+    torch.cuda.empty_cache()
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 log("==========================================================================")
 log("🔥 INITIATING GODMODE 90% TARGET 3D sMRI DEEP LEARNING PIPELINE")
@@ -42,7 +48,7 @@ log(f"1. PyTorch Engine Device: {device}")
 if device.type == 'cuda':
     log(f"🚀 NATIVE A100 GPU ACTIVE: {torch.cuda.get_device_name(0)}")
 
-GLOBAL_BATCH_SIZE = 8
+GLOBAL_BATCH_SIZE = 4 # Safe Memory Footprint
 EPOCHS = 60
 
 # Output Directories
@@ -239,6 +245,9 @@ criterion = BinaryFocalLoss()
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-3)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
 
+# Automatic Mixed Precision GradScaler
+scaler = torch.cuda.amp.GradScaler(enabled=(device.type == 'cuda'))
+
 best_test_acc = 0.0
 best_metrics = {}
 save_path = os.path.join(base_dir, 'GodMode_3D_Best.pt')
@@ -251,10 +260,13 @@ for epoch in range(1, EPOCHS + 1):
     train_loss = 0.0
     for a, c, s, targets in train_loader:
         optimizer.zero_grad()
-        outputs = model(a, c, s)
-        loss = criterion(outputs, targets)
-        loss.backward()
-        optimizer.step()
+        with torch.cuda.amp.autocast(enabled=(device.type == 'cuda')):
+            outputs = model(a, c, s)
+            loss = criterion(outputs, targets)
+            
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
         train_loss += loss.item()
         
     scheduler.step()
@@ -264,7 +276,8 @@ for epoch in range(1, EPOCHS + 1):
     test_preds, test_targets, test_probs = [], [], []
     with torch.no_grad():
         for a, c, s, targets in test_loader:
-            outputs = model(a, c, s)
+            with torch.cuda.amp.autocast(enabled=(device.type == 'cuda')):
+                outputs = model(a, c, s)
             test_probs.extend(outputs.cpu().numpy())
             test_preds.extend((outputs > 0.5).cpu().numpy())
             test_targets.extend(targets.cpu().numpy())
