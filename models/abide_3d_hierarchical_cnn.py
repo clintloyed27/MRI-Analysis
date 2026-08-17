@@ -33,7 +33,8 @@ import warnings
 warnings.filterwarnings('ignore')
 
 print("1. Initializing 3D Tensor Ecosystem...")
-GLOBAL_BATCH_SIZE = 2 
+# Optimized batch size for Lightning AI / Enterprise GPUs (A100, L4, L40S)
+GLOBAL_BATCH_SIZE = 8 
 
 # Cross-Platform Output Directory Configuration
 if os.path.exists('/kaggle/working'):
