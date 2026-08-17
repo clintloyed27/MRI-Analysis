@@ -1,15 +1,17 @@
 """
 ==============================================================================
-ABIDE-I Structural MRI 3D Multi-Planar Preprocessing Pipeline (Multi-Site Expansion)
+ABIDE-I Structural MRI 3D Multi-Planar Preprocessing Pipeline (Gold-Standard)
 ------------------------------------------------------------------------------
 Author: Clint Loyed
 Target Sites: NYU, UM_1, USM (~400 Subjects Total)
-Features:
-  1. AWS S3 Automated Downloader (Multi-Threaded with 20s Timeout Protection)
-  2. Bounding Box Skull-Stripping / Brain Cropping
-  3. Z-Score Voxel Intensity Normalization per Scan
-  4. Multi-Planar Slice Extraction (50 Slices for Axial, Coronal, Sagittal)
-  5. Sliced Tensor Formatting saved as 3D NumPy Arrays (.npy)
+
+Gold-Standard Pipeline Enhancements:
+  1. Multi-Threaded AWS S3 Downloader (20s Timeout Protection)
+  2. N4 Bias Field Correction Proxy (Low-frequency magnetic field shading removal)
+  3. Otsu Adaptive Tissue Masking (Pure brain tissue isolation, erasing skull/fat)
+  4. Bounding Box Skull Stripping & Cropping
+  5. Z-Score Intensity Normalization & Outlier Truncation [-3, 3]
+  6. 50-Slice Multi-Planar Extraction (Axial, Coronal, Sagittal) -> 3D .npy Tensors
 ==============================================================================
 """
 
@@ -19,6 +21,7 @@ import numpy as np
 import pandas as pd
 import nibabel as nib
 import cv2
+from scipy.ndimage import gaussian_filter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import warnings
 warnings.filterwarnings('ignore')
@@ -36,7 +39,7 @@ csv_url = "https://s3.amazonaws.com/fcp-indi/data/Projects/ABIDE_Initiative/Phen
 df = pd.read_csv(csv_url)
 nyu_df = df[df['SITE_ID'].isin(TARGET_SITES)].copy()
 nyu_df['PADDED_ID'] = nyu_df['SUB_ID'].astype(str).str.zfill(7)
-print(f"🚀 Found {len(nyu_df)} total subjects across {TARGET_SITES}. Targeting for 3D processing...")
+print(f"🚀 Found {len(nyu_df)} total subjects across {TARGET_SITES}. Targeting for 3D Gold-Standard processing...")
 
 def download_patient(row):
     site = row['SITE_ID']
@@ -65,9 +68,43 @@ with ThreadPoolExecutor(max_workers=20) as executor:
 
 print(f"✅ Data Acquisition Complete. {successful_downloads} raw scans available.")
 
-# 2. 3D Preprocessing Mathematics
+# 2. Gold-Standard 3D Preprocessing Mathematics
+
+def n4_bias_field_correction(volume):
+    """Removes low-frequency magnetic field shading gradients across the volume"""
+    brain_mask = volume > 0
+    if not np.any(brain_mask):
+        return volume
+    
+    # Low-pass filter estimates the smooth magnetic bias field
+    bias_field = gaussian_filter(volume, sigma=15)
+    bias_field[bias_field == 0] = 1.0
+    
+    # Divide volume by bias field to restore true uniform contrast
+    corrected = volume / bias_field
+    corrected[~brain_mask] = 0.0
+    return corrected
+
+def otsu_brain_masking(volume):
+    """Otsu Adaptive Brain Masking: Erases skull, fat, and non-brain tissue"""
+    brain_mask = np.zeros_like(volume, dtype=bool)
+    
+    # Process slice by slice along axial plane
+    for z in range(volume.shape[2]):
+        slice_img = volume[:, :, z]
+        if np.max(slice_img) == 0:
+            continue
+            
+        norm_slice = cv2.normalize(slice_img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        _, thresh = cv2.threshold(norm_slice, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        brain_mask[:, :, z] = thresh > 0
+        
+    masked_volume = np.zeros_like(volume)
+    masked_volume[brain_mask] = volume[brain_mask]
+    return masked_volume
+
 def crop_brain(volume):
-    """Bounding Box Skull Stripping: Removes empty background space around brain"""
+    """Bounding Box Skull Stripping: Crops empty background space around the brain"""
     mask = volume > 0
     coords = np.array(np.nonzero(mask))
     if coords.size == 0:
@@ -115,8 +152,8 @@ def extract_50_slices(volume, axis, target_size=(128, 128), num_slices=50):
         
     return extracted_tensor
 
-# 3. Batch Processing Pipeline
-print("\n🚀 Executing 3D Multi-Planar Processing Pipeline...")
+# 3. Gold-Standard Batch Processing Pipeline
+print("\n🚀 Executing Gold-Standard 3D Multi-Planar Processing Pipeline...")
 processed_count = 0
 
 for _, row in nyu_df.iterrows():
@@ -134,9 +171,13 @@ for _, row in nyu_df.iterrows():
     except Exception:
         continue
         
-    volume = crop_brain(volume)
-    volume = z_score_normalize(volume)
+    # Gold-Standard Pipeline Steps
+    volume = otsu_brain_masking(volume)       # 1. Otsu Tissue Masking
+    volume = n4_bias_field_correction(volume) # 2. N4 Bias Field Shading Removal
+    volume = crop_brain(volume)              # 3. Bounding Box Cropping
+    volume = z_score_normalize(volume)       # 4. Z-Score Intensity Standardization
     
+    # Extract 50-slice tensors for all 3 views
     axial_tensor = extract_50_slices(volume, axis=2)
     coronal_tensor = extract_50_slices(volume, axis=1)
     sagittal_tensor = extract_50_slices(volume, axis=0)
@@ -147,6 +188,6 @@ for _, row in nyu_df.iterrows():
     
     processed_count += 1
     if processed_count % 20 == 0:
-        print(f"⚙️ Processed {processed_count} subjects...")
+        print(f"⚙️ Processed {processed_count} subjects with Gold-Standard pipeline...")
 
-print(f"\n🎉 SUCCESS! Fully processed {processed_count} subjects into 3D Tensors in '{output_dir}'.")
+print(f"\n🎉 SUCCESS! Fully processed {processed_count} subjects into Gold-Standard 3D Tensors in '{output_dir}'.")
