@@ -1,75 +1,90 @@
-# 🧠 Structural MRI Analysis & Neuroimaging System
-### Deep Learning Pipeline for Brain Tumor, Alzheimer's, and Autism Spectrum Disorder (ASD) Classification
+# 🧠 3D Multi-Planar Structural MRI Deep Learning Framework for Autism Spectrum Disorder (ASD) Classification
 
-This repository contains a comprehensive, end-to-end Artificial Intelligence system designed to analyze Magnetic Resonance Imaging (MRI) scans and raw hospital DICOM/NIfTI files to detect structural brain anomalies and neurodevelopmental conditions.
+A state-of-the-art 3D Volumetric Deep Learning system for classifying Autism Spectrum Disorder (ASD) from T1-weighted Structural Magnetic Resonance Imaging (sMRI) scans on the **ABIDE-I NYU Cohort**.
 
----
-
-## 🔬 Neurological Diseases Identified
-
-This framework features three highly specialized deep learning pipelines:
-
-### 1. Autism Spectrum Disorder (ASD) — Volumetric Neurodevelopmental Analysis
-* **Modality:** Structural MRI (sMRI, T1-weighted)
-* **Dataset:** ABIDE-I (NYU Langone Medical Center Cohort — 184 subjects: 79 ASD / 105 Healthy Control).
-* **Architecture:** True 3D Hierarchical Multi-Planar Convolutional Neural Network (`Conv3D`) based on Hammash & Younis (2026).
-* **Key Innovations:**
-  * **3D Multi-Planar Extraction:** Extracts 50 consecutive middle slices across Axial, Coronal, and Sagittal planes into raw 3D NumPy arrays `(50, 128, 128, 1)`.
-  * **Alternating Kernel Strategy:** Alternates `3x3x3` kernels (fine anatomical details like gyri/sulci) with `5x5x5` kernels (coarse structures like lateral ventricles).
-  * **3D CBAM Attention:** Channel and 3D Spatial attention modules dynamically pinpoint ASD-correlated anatomical regions.
-  * **Adaptive Focal Loss:** Handles borderline, hard-to-classify diagnostic cases ($\gamma=2.0, \alpha=0.25$).
-* **Experimental Performance:**
-  * **2D Single-View Baseline:** `56.25%`
-  * **2.5D Global Run:** `63.62%`
-  * **True 3D Hierarchical 5-Fold CV Average:** **`69.59%`**
-  * **Peak Fold Result (Fold 5):** **`75.00%`** *(+18.75 pp gain over baseline)*
+Replicating and adapting the methodology of **Hammash & Younis (2026)**, this repository implements genuine **3D Convolutions (`Conv3D`)** across three orthogonal anatomical views (Axial, Coronal, Sagittal) with 3D CBAM Attention and Adaptive Focal Loss.
 
 ---
 
-### 2. Brain Tumors — Macroscopic Tissue Growth
-Detects large-scale abnormal tissue growth and classifies 2D scans into four distinct categories:
-* **Glioma Tumor:** Tumors occurring in the brain and spinal cord tissue.
-* **Meningioma Tumor:** Tumors arising from the meninges surrounding the brain.
-* **Pituitary Tumor:** Tumors developing in the pituitary gland at the cranial base.
-* **No Tumor:** Healthy brain structure.
+## 📊 Experimental Results (Stratified 5-Fold Cross-Validation)
+
+| Evaluation Protocol | Dataset | Accuracy Metric | Gain over 2D Baseline |
+| :--- | :--- | :--- | :--- |
+| **2D Single-View Baseline** | NYU (1 Slice) | **56.25%** | Baseline |
+| **2.5D Multi-Site Run** | ABIDE (3-Slice RGB Stack) | **63.62%** | +7.37 pp |
+| **3D Multi-Planar CV (Average)** | **NYU (50 Slices, 3-View)** | **69.59%** | **+13.34 pp** |
+| **3D Multi-Planar CV (Fold 5 Peak)** | **NYU (50 Slices, 3-View)** | **75.00%** | **+18.75 pp** |
+
+### Per-Fold Breakdown (5-Fold Stratified CV)
+* **Fold 1:** `70.27%`
+* **Fold 2:** `67.57%`
+* **Fold 3:** `64.86%`
+* **Fold 4:** `70.27%`
+* **Fold 5:** **`75.00%` (Peak Result)**
+* 🌟 **Final 5-Fold Average Accuracy:** **`69.59%`**
 
 ---
 
-### 3. Alzheimer's Disease — Microscopic Tissue Atrophy
-Detects microscopic tissue shrinkage (atrophy), primarily focusing on the Hippocampus and medial temporal lobes. Classifies scans into four clinical stages:
-* **Very Mild Impairment:** Earliest perceptible tissue loss.
-* **Mild Impairment:** Early-stage structural cognitive decline.
-* **Moderate Impairment:** Obvious, significant tissue atrophy.
-* **No Impairment:** Healthy brain structure.
+## 🔬 Dataset Overview (ABIDE-I NYU Cohort)
+
+* **Source Repository:** Autism Brain Imaging Data Exchange I (ABIDE-I).
+* **Scanner Site:** NYU Langone Medical Center ($N=184$ subjects).
+* **Class Distribution:**
+  * **Autism Spectrum Disorder (ASD):** 79 Subjects (42.93%)
+  * **Healthy Control (HC):** 105 Subjects (57.07%)
+* **Significance:** Near-equal ~43/57 balance eliminates majority-class label bias, ensuring metrics reflect genuine neuroanatomical feature discriminability.
 
 ---
 
-## 💻 Technology Stack & Architectural Overview
+## ⚙️ Preprocessing & Model Architecture
 
-| Technology | Purpose | Technical Justification |
-|------------|---------|-------------------------|
-| **TensorFlow & Keras 3** | Core Deep Learning | Standard framework for building 2D and 3D convolutional networks. |
-| **Conv3D (3D Convolution)** | Volumetric Feature Extraction | Processes true 3D spatial tensors `(Depth, Height, Width, Channels)` rather than isolated 2D slice images. |
-| **EfficientNetB0 & DenseNet121** | 2D Feature Extraction | Compound scaling and dense feature reuse for 2D classification pipelines. |
-| **3D CBAM Attention** | Explainable Feature Gating | Dynamically weights feature channels and 3D spatial regions linked to ASD biomarkers. |
-| **Adaptive Focal Loss** | Objective Function | Down-weights easy samples and focuses gradient updates on hard borderline subjects. |
-| **Pydicom & NiBabel** | Neuroimaging I/O | Parses raw 16-bit hospital `.dcm` files and 3D NIfTI `.nii.gz` volumetric MRI data. |
-| **Streamlit** | Interactive Web Dashboard | Local web application deploying models for real-time inference and Grad-CAM visualization. |
+### 1. Preprocessing Pipeline (`preprocessing/abide_3d_preprocessing.py`)
+* **Bounding Box Skull Stripping:** Crops non-zero voxel coordinates to eliminate uninformative background air.
+* **Z-Score Intensity Normalization:** Rescales voxel brightness per scan: $I_{\text{norm}} = (I_{\text{brain}} - \mu)/\sigma$, with outlier truncation at $[-3\sigma, +3\sigma]$.
+* **Multi-Planar 50-Slice Extraction:** Extracts 50 consecutive middle slices for Axial (Z-axis), Coronal (Y-axis), and Sagittal (X-axis) physical planes into 3D NumPy arrays `(50, 128, 128, 1)`.
 
----
-
-## ⚙️ Preprocessing & Evaluation Pipeline
-
-### 3D sMRI Preprocessing Pipeline (`preprocessing/abide_3d_preprocessing.py`)
-1. **Bounding Box Skull Stripping:** Detects non-zero voxel intensity coordinates to crop away empty background space, reducing computational load.
-2. **Z-Score Intensity Normalization:** Standardizes pixel intensity distributions across scans: $I_{\text{norm}} = (I_{\text{brain}} - \mu) / \sigma$, with outlier truncation at $[-3\sigma, +3\sigma]$.
-3. **Multi-Planar Slice Sampling:** Samples 50 middle slices along Axial (Z-axis), Coronal (Y-axis), and Sagittal (X-axis) physical planes into raw `.npy` tensors.
-
-### Evaluation Protocol
-* **Stratified 5-Fold Cross Validation:** Evaluates models under an 80% Train / 20% Test split repeated across 5 folds, maintaining exact class balance and preventing data leakage.
+### 2. Neural Network Architecture (`models/abide_3d_hierarchical_cnn.py`)
+* **Volumetric Engine:** Genuine `Conv3D` layers operating on 50-slice spatial volumes.
+* **Alternating Kernel Strategy:** Alternates $3 \times 3 \times 3$ kernels (fine gyri/sulci) with $5 \times 5 \times 5$ kernels (coarse lateral ventricles/cerebellum).
+* **Hierarchical Scaling:** $32 \rightarrow 64 \rightarrow 128 \rightarrow 256$ channel progression.
+* **ResNet Skip Connections:** Residual addition blocks (`Conv3D + BatchNorm + Activation + Add`) preserve gradient flow across deep volumetric stages.
+* **3D CBAM Attention:** Channel and 3D Spatial attention modules dynamically isolate ASD-correlated neuroanatomical biomarkers.
+* **Adaptive Focal Loss:** Binary Focal Cross-Entropy ($\gamma=2.0, \alpha=0.25$) forces the network to focus on hard borderline cases.
+* **MLP Classifier Head:** `LayerNormalization` $\rightarrow$ `Dense(256)` $\rightarrow$ `GELU` $\rightarrow$ `Dropout(0.5)` $\rightarrow$ `Dense(1, activation='sigmoid')`.
 
 ---
 
-## 📄 References & Literature Citations
+## 🚀 How to Run
+
+### Step 1: Execute 3D Preprocessing
+```bash
+python preprocessing/abide_3d_preprocessing.py
+```
+*(Downloads the NYU NIfTI files from AWS S3, crops the brain, normalizes intensities, and exports 50-slice 3D `.npy` tensors to `/kaggle/working/processed_paper_3D/`)*
+
+### Step 2: Run 3D Multi-Planar 5-Fold Training
+```bash
+python models/abide_3d_hierarchical_cnn.py
+```
+*(Loads the 3D `.npy` tensors, constructs the 3-Input Conv3D CBAM network, and executes Stratified 5-Fold Cross Validation)*
+
+---
+
+## 📂 Repository Structure
+
+```text
+MRI-Analysis/
+├── preprocessing/
+│   └── abide_3d_preprocessing.py      # Automated AWS S3 downloader & 3D 50-slice multi-planar tensor generator
+├── models/
+│   └── abide_3d_hierarchical_cnn.py   # True 3D Hierarchical Conv3D CBAM network with 5-Fold Stratified CV
+├── report/
+│   └── 3D_MultiPlanar_ASD_Research_Report.md  # Detailed research report, methodology, and fold results
+└── README.md                          # Repository documentation
+```
+
+---
+
+## 📄 Academic Reference
 
 * **Hammash, N. M., & Younis, M. C. (2026).** *A Hierarchical Multi-View Deep Learning Framework for Autism Classification Using Structural and Functional MRI.* MDPI Journal of Imaging, 12(3), 109. [DOI: 10.3390/jimaging12030109]
