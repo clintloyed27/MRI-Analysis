@@ -9,6 +9,7 @@ Native PyTorch CUDA GPU Accelerator (Guaranteed A100 / L4 Native Speed)
 """
 
 import os
+import sys
 import numpy as np
 import pandas as pd
 import torch
@@ -20,11 +21,15 @@ from sklearn.metrics import accuracy_score
 import warnings
 warnings.filterwarnings('ignore')
 
+# Force unbuffered live stdout printing
+def log(text=""):
+    print(text, flush=True)
+
 # 1. GPU Acceleration Verification
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"1. Initializing PyTorch 3D Engine on Device: {device}")
+log(f"1. Initializing PyTorch 3D Engine on Device: {device}")
 if device.type == 'cuda':
-    print(f"🚀 NATIVE GPU ACCELERATOR ACTIVE: {torch.cuda.get_device_name(0)}")
+    log(f"🚀 NATIVE GPU ACCELERATOR ACTIVE: {torch.cuda.get_device_name(0)}")
 
 GLOBAL_BATCH_SIZE = 8
 EPOCHS = 50
@@ -42,7 +47,7 @@ if os.path.exists(os.path.join(base_dir, 'processed_paper_3D_224')):
 else:
     data_dir = os.path.join(base_dir, 'processed_paper_3D')
 
-print(f"📁 Ingesting 3D Tensors from: '{data_dir}'...")
+log(f"📁 Ingesting 3D Tensors from: '{data_dir}'...")
 df = pd.read_csv(phenotype_csv)
 TARGET_SITES = ['NYU', 'UM_1', 'USM']
 df = df[df['SITE_ID'].isin(TARGET_SITES)].dropna(subset=['DX_GROUP'])
@@ -62,7 +67,6 @@ for patient_id in os.listdir(data_dir):
     except Exception:
         continue
         
-    # Reshape (50, H, W, 1) -> (1, 50, H, W) for PyTorch Conv3D
     ax = np.transpose(ax, (3, 0, 1, 2))
     cor = np.transpose(cor, (3, 0, 1, 2))
     sag = np.transpose(sag, (3, 0, 1, 2))
@@ -77,8 +81,8 @@ X_cor = np.array(X_cor, dtype=np.float32)
 X_sag = np.array(X_sag, dtype=np.float32)
 y = np.array(y, dtype=np.float32)
 
-print(f"✅ Total 3D Volume Tensors Loaded: {len(X_ax)}")
-print(f"   Autism (1): {int(np.sum(y == 1))}, Healthy Control (0): {int(np.sum(y == 0))}")
+log(f"✅ Total 3D Volume Tensors Loaded: {len(X_ax)}")
+log(f"   Autism (1): {int(np.sum(y == 1))}, Healthy Control (0): {int(np.sum(y == 0))}")
 
 class sMRIDataset(Dataset):
     def __init__(self, ax, cor, sag, labels, augment=False):
@@ -122,14 +126,12 @@ class CBAM3D(nn.Module):
         self.spatial_conv = nn.Conv3d(2, 1, 3, padding=1)
 
     def forward(self, x):
-        # Channel Attention
         b, c, _, _, _ = x.size()
         avg_p = F.adaptive_avg_pool3d(x, 1).view(b, c)
         max_p = F.adaptive_max_pool3d(x, 1).view(b, c)
         ca = torch.sigmoid(self.fc2(F.relu(self.fc1(avg_p))) + self.fc2(F.relu(self.fc1(max_p))))
         x = x * ca.view(b, c, 1, 1, 1)
         
-        # Spatial Attention
         sa_avg = torch.mean(x, dim=1, keepdim=True)
         sa_max, _ = torch.max(x, dim=1, keepdim=True)
         sa = torch.sigmoid(self.spatial_conv(torch.cat([sa_avg, sa_max], dim=1)))
@@ -189,20 +191,20 @@ class BinaryFocalLoss(nn.Module):
         focal_loss = alpha_t * (1 - p_t) ** self.gamma * bce
         return focal_loss.mean()
 
-print("\n🚀 4. Initiating PyTorch 5-Fold Stratified Cross Validation Protocol...")
+log("\n🚀 4. Initiating PyTorch 5-Fold Stratified Cross Validation Protocol...")
 skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 fold_scores = []
 
 for fold, (train_idx, val_idx) in enumerate(skf.split(X_ax, y), 1):
-    print(f"\n==========================================")
-    print(f"🔥 TRAINING FOLD {fold} / 5 (PyTorch GPU Mode)")
-    print(f"==========================================")
+    log(f"\n==========================================")
+    log(f"🔥 TRAINING FOLD {fold} / 5 (PyTorch GPU Mode)")
+    log(f"==========================================")
     
     train_dataset = sMRIDataset(X_ax[train_idx], X_cor[train_idx], X_sag[train_idx], y[train_idx], augment=True)
     val_dataset = sMRIDataset(X_ax[val_idx], X_cor[val_idx], X_sag[val_idx], y[val_idx], augment=False)
     
-    train_loader = DataLoader(train_dataset, batch_size=GLOBAL_BATCH_SIZE, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=GLOBAL_BATCH_SIZE, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=GLOBAL_BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=GLOBAL_BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
     
     model = Hierarchical3DCNN().to(device)
     criterion = BinaryFocalLoss()
@@ -240,15 +242,14 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(X_ax, y), 1):
             best_acc = val_acc
             torch.save(model.state_dict(), os.path.join(base_dir, f'PyTorch_3D_Fold{fold}.pt'))
             
-        if epoch % 10 == 0 or epoch == EPOCHS:
-            print(f"Epoch {epoch:02d}/{EPOCHS} | Train Loss: {train_loss/len(train_loader):.4f} | Val Acc: {val_acc*100:.2f}% (Peak: {best_acc*100:.2f}%)")
+        log(f"Fold {fold} | Epoch {epoch:02d}/{EPOCHS} | Train Loss: {train_loss/len(train_loader):.4f} | Val Acc: {val_acc*100:.2f}% (Peak: {best_acc*100:.2f}%)")
             
     fold_scores.append(best_acc)
-    print(f"✅ Fold {fold} PyTorch Peak Validation Accuracy: {best_acc*100:.2f}%")
+    log(f"✅ Fold {fold} PyTorch Peak Validation Accuracy: {best_acc*100:.2f}%")
 
-print("\n==============================================")
-print("🏆 PyTorch 3D MULTI-PLANAR 5-FOLD CV COMPLETE")
-print("==============================================")
+log("\n==============================================")
+log("🏆 PyTorch 3D MULTI-PLANAR 5-FOLD CV COMPLETE")
+log("==============================================")
 for i, score in enumerate(fold_scores, 1):
-    print(f"Fold {i}: {score*100:.2f}%")
-print(f"🌟 FINAL PyTorch 3D AVERAGE ACCURACY: {np.mean(fold_scores)*100:.2f}%")
+    log(f"Fold {i}: {score*100:.2f}%")
+log(f"🌟 FINAL PyTorch 3D AVERAGE ACCURACY: {np.mean(fold_scores)*100:.2f}%")
