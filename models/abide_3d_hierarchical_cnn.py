@@ -8,19 +8,36 @@ Target Resolution: Full HD (224, 224) 3D Volumetric Tensors
 Based on the sMRI 3D Architecture by Hammash & Younis (2026)
 
 Key Features:
-  1. True 3D Convolutions (Conv3D) over 50-slice (50, 224, 224, 1) spatial volumes
-  2. Alternating kernel sizes (3x3x3 for fine features, 5x5x5 for coarse structures)
-  3. Hierarchical Channel Scaling (32 -> 64 -> 128 -> 256)
-  4. ResNet-Style Skip Connections
-  5. 3D CBAM Channel-Spatial Attention Mechanism
-  6. Adaptive Binary Focal Loss (gamma=2.0, alpha=0.25)
-  7. Cosine Annealing Learning Rate Scheduler (1e-4 down to 1e-6)
-  8. 3D Volume Augmentation (Random Flipping + Scale Normalization)
-  9. LayerNorm + Dense(256) + GELU + Dropout(0.5) Classifier Head
+  1. Automated CUDA / cuDNN Path Binding for Enterprise GPUs (A100, L4)
+  2. True 3D Convolutions (Conv3D) over 50-slice (50, 224, 224, 1) spatial volumes
+  3. Alternating kernel sizes (3x3x3 for fine features, 5x5x5 for coarse structures)
+  4. Hierarchical Channel Scaling (32 -> 64 -> 128 -> 256)
+  5. ResNet-Style Skip Connections
+  6. 3D CBAM Channel-Spatial Attention Mechanism
+  7. Adaptive Binary Focal Loss (gamma=2.0, alpha=0.25)
+  8. Cosine Annealing Learning Rate Scheduler (1e-4 down to 1e-6)
+  9. 3D Volume Augmentation (Random Flipping + Scale Normalization)
+ 10. LayerNorm + Dense(256) + GELU + Dropout(0.5) Classifier Head
 ==============================================================================
 """
 
 import os
+import sys
+import site
+
+# 0. Automated CUDA / cuDNN Shared Library Registration for TensorFlow
+site_packages = site.getsitepackages()[0]
+nvidia_base = os.path.join(site_packages, 'nvidia')
+if os.path.exists(nvidia_base):
+    cuda_lib_paths = []
+    for pkg in os.listdir(nvidia_base):
+        lib_dir = os.path.join(nvidia_base, pkg, 'lib')
+        if os.path.isdir(lib_dir):
+            cuda_lib_paths.append(lib_dir)
+    if cuda_lib_paths:
+        current_ld = os.environ.get('LD_LIBRARY_PATH', '')
+        os.environ['LD_LIBRARY_PATH'] = ':'.join(cuda_lib_paths) + (':' + current_ld if current_ld else '')
+
 import numpy as np
 import pandas as pd
 import tensorflow as tf
@@ -36,6 +53,17 @@ import warnings
 warnings.filterwarnings('ignore')
 
 print("1. Initializing 224x224 Full HD 3D Tensor Ecosystem...")
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    print(f"🚀 GPU DETECTED & REGISTERED SUCCESSFULLY: {gpus}")
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+    except Exception as e:
+        print(f"Memory growth setting notice: {e}")
+else:
+    print("⚠️ Warning: TensorFlow is running on CPU mode.")
+
 GLOBAL_BATCH_SIZE = 8 # Optimized for Enterprise GPUs (A100 / L4 / L40S)
 EPOCHS = 50
 
@@ -86,7 +114,7 @@ print(f"   Shape per tensor: {X_ax.shape[1:]}")
 print(f"   Autism (1): {np.sum(y == 1)}, Healthy Control (0): {np.sum(y == 0)}")
 
 # Dynamic Input Shape Detection
-tensor_shape = X_ax.shape[1:] # e.g. (50, 224, 224, 1) or (50, 128, 128, 1)
+tensor_shape = X_ax.shape[1:]
 
 def binary_focal_loss(gamma=2.0, alpha=0.25):
     """Adaptive Focal Loss targeting difficult borderline subjects"""
