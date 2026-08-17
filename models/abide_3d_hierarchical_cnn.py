@@ -1,8 +1,9 @@
 """
 ==============================================================================
-ABIDE-I 3D Hierarchical Multi-Planar Convolutional Neural Network
+ABIDE-I 3D Hierarchical Multi-Planar Convolutional Neural Network (Multi-Site)
 ------------------------------------------------------------------------------
 Author: Clint Loyed
+Target Sites: NYU, UM_1, USM (~400 Subjects Total)
 Based on the sMRI 3D Architecture by Hammash & Younis (2026)
 
 Key Features:
@@ -31,14 +32,15 @@ import warnings
 warnings.filterwarnings('ignore')
 
 print("1. Initializing 3D Tensor Ecosystem...")
-GLOBAL_BATCH_SIZE = 2 # Sized for 16GB GPU VRAM stability
+GLOBAL_BATCH_SIZE = 2 
 
 data_dir = '/kaggle/working/processed_paper_3D/'
 phenotype_csv = '/kaggle/input/datasets/clintloyed/abide-autism-10x-data/ABIDE_Phenotypic.csv'
 
-print("2. Loading Clinical Metadata (NYU Cohort)...")
+print("2. Loading Clinical Metadata (Multi-Site: NYU, UM_1, USM)...")
 df = pd.read_csv(phenotype_csv)
-df = df[df['SITE_ID'] == 'NYU'].dropna(subset=['DX_GROUP'])
+TARGET_SITES = ['NYU', 'UM_1', 'USM']
+df = df[df['SITE_ID'].isin(TARGET_SITES)].dropna(subset=['DX_GROUP'])
 label_dict = {str(row['SUB_ID']).zfill(7): 1 if row['DX_GROUP'] == 1 else 0 for _, row in df.iterrows()}
 
 print("3. Ingesting 3D NumPy Volume Tensors (Axial, Coronal, Sagittal)...")
@@ -62,7 +64,7 @@ for patient_id in os.listdir(data_dir):
 X_ax, X_cor, X_sag = np.array(X_ax), np.array(X_cor), np.array(X_sag)
 y = np.array(y)
 
-print(f"✅ Total 3D Volume Tensors Loaded: {len(X_ax)}")
+print(f"✅ Total Multi-Site 3D Volume Tensors Loaded: {len(X_ax)}")
 print(f"   Autism (1): {np.sum(y == 1)}, Healthy Control (0): {np.sum(y == 0)}")
 
 def binary_focal_loss(gamma=2.0, alpha=0.25):
@@ -91,14 +93,12 @@ def build_paper_3d_cnn():
         return x
 
     def build_3d_feature_extractor(view_input):
-        # 32 -> 64 -> 128 -> 256 Channels with Alternating 3x3x3 and 5x5x5 Kernels
         x = hierarchical_block(view_input, 32, (3, 3, 3))
         x = hierarchical_block(x, 64, (5, 5, 5))
         x = hierarchical_block(x, 128, (3, 3, 3))
         x = hierarchical_block(x, 256, (5, 5, 5))
         
         # 3D CBAM Attention
-        # 1. Channel Attention
         channel_avg = GlobalAveragePooling3D()(x)
         channel_max = GlobalMaxPooling3D()(x)
         dense_1 = Dense(256 // 8, activation='relu')
@@ -111,7 +111,6 @@ def build_paper_3d_cnn():
         channel_attention = Reshape((1, 1, 1, 256))(channel_attention)
         x = x * channel_attention
         
-        # 2. Spatial Attention (3D)
         spatial_avg = K.mean(x, axis=-1, keepdims=True)
         spatial_max = K.max(x, axis=-1, keepdims=True)
         spatial_concat = Concatenate(axis=-1)([spatial_avg, spatial_max])
@@ -125,7 +124,6 @@ def build_paper_3d_cnn():
     cor_feat = build_3d_feature_extractor(cor_input)
     sag_feat = build_3d_feature_extractor(sag_input)
     
-    # Residual Multi-Planar Fusion & MLP Classifier Head
     z = Concatenate()([ax_feat, cor_feat, sag_feat])
     z = LayerNormalization()(z)
     z = Dense(256, activation='gelu')(z)
@@ -153,7 +151,7 @@ def augment_3d_tensors(inputs, label):
 
 for fold, (train_idx, val_idx) in enumerate(skf.split(X_ax, y), 1):
     print(f"\n==========================================")
-    print(f"🔥 TRAINING FOLD {fold} / 5 (3D CNN MODE)")
+    print(f"🔥 TRAINING FOLD {fold} / 5 (MULTI-SITE 3D MODE)")
     print(f"==========================================")
     
     tf.keras.backend.clear_session()
@@ -193,11 +191,11 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(X_ax, y), 1):
     y_pred = (y_pred_prob > 0.5).astype(int)
     fold_acc = accuracy_score(y_val, y_pred)
     fold_scores.append(fold_acc)
-    print(f"\n✅ Fold {fold} 3D Validation Accuracy: {fold_acc:.4f}")
+    print(f"\n✅ Fold {fold} Multi-Site 3D Validation Accuracy: {fold_acc:.4f}")
 
 print("\n==============================================")
-print("🏆 3D MULTI-PLANAR 5-FOLD CROSS VALIDATION COMPLETE")
+print("🏆 MULTI-SITE 3D MULTI-PLANAR 5-FOLD CV COMPLETE")
 print("==============================================")
 for i, score in enumerate(fold_scores, 1):
     print(f"Fold {i}: {score*100:.2f}%")
-print(f"🌟 FINAL 3D AVERAGE ACCURACY: {np.mean(fold_scores)*100:.2f}%")
+print(f"🌟 FINAL MULTI-SITE 3D AVERAGE ACCURACY: {np.mean(fold_scores)*100:.2f}%")

@@ -1,8 +1,9 @@
 """
 ==============================================================================
-ABIDE-I Structural MRI 3D Multi-Planar Preprocessing Pipeline
+ABIDE-I Structural MRI 3D Multi-Planar Preprocessing Pipeline (Multi-Site Expansion)
 ------------------------------------------------------------------------------
 Author: Clint Loyed
+Target Sites: NYU, UM_1, USM (~400 Subjects Total)
 Features:
   1. AWS S3 Automated Downloader (Multi-Threaded with 20s Timeout Protection)
   2. Bounding Box Skull-Stripping / Brain Cropping
@@ -23,18 +24,19 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # Directories
-raw_dir = '/kaggle/working/raw_abide_nyu/'
+raw_dir = '/kaggle/working/raw_abide_multi/'
 output_dir = '/kaggle/working/processed_paper_3D/'
 os.makedirs(raw_dir, exist_ok=True)
 os.makedirs(output_dir, exist_ok=True)
 
-# 1. Dataset Acquisition (NYU Cohort)
-print("📊 Fetching Official ABIDE Phenotypic Metadata...")
+# 1. Dataset Acquisition (Multi-Site Expansion: NYU, UM_1, USM)
+TARGET_SITES = ['NYU', 'UM_1', 'USM']
+print(f"📊 Fetching Official ABIDE Phenotypic Metadata for Sites: {TARGET_SITES}...")
 csv_url = "https://s3.amazonaws.com/fcp-indi/data/Projects/ABIDE_Initiative/Phenotypic_V1_0b_preprocessed1.csv"
 df = pd.read_csv(csv_url)
-nyu_df = df[df['SITE_ID'] == 'NYU'].copy()
+nyu_df = df[df['SITE_ID'].isin(TARGET_SITES)].copy()
 nyu_df['PADDED_ID'] = nyu_df['SUB_ID'].astype(str).str.zfill(7)
-print(f"🚀 Targeting {len(nyu_df)} NYU cohort subjects for 3D processing...")
+print(f"🚀 Found {len(nyu_df)} total subjects across {TARGET_SITES}. Targeting for 3D processing...")
 
 def download_patient(row):
     site = row['SITE_ID']
