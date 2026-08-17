@@ -12,6 +12,7 @@ Gold-Standard Pipeline Enhancements:
   4. Bounding Box Skull Stripping & Cropping
   5. Z-Score Intensity Normalization & Outlier Truncation [-3, 3]
   6. 50-Slice Multi-Planar Extraction (Axial, Coronal, Sagittal) -> 3D .npy Tensors
+  7. Cross-Platform Compatibility (Lightning AI, Kaggle, Colab, Local)
 ==============================================================================
 """
 
@@ -26,9 +27,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import warnings
 warnings.filterwarnings('ignore')
 
-# Directories
-raw_dir = '/kaggle/working/raw_abide_multi/'
-output_dir = '/kaggle/working/processed_paper_3D/'
+# Cross-Platform Output Directory Configuration
+if os.path.exists('/kaggle/working'):
+    base_dir = '/kaggle/working/'
+else:
+    base_dir = './'
+
+raw_dir = os.path.join(base_dir, 'raw_abide_multi')
+output_dir = os.path.join(base_dir, 'processed_paper_3D')
 os.makedirs(raw_dir, exist_ok=True)
 os.makedirs(output_dir, exist_ok=True)
 
@@ -76,11 +82,9 @@ def n4_bias_field_correction(volume):
     if not np.any(brain_mask):
         return volume
     
-    # Low-pass filter estimates the smooth magnetic bias field
     bias_field = gaussian_filter(volume, sigma=15)
     bias_field[bias_field == 0] = 1.0
     
-    # Divide volume by bias field to restore true uniform contrast
     corrected = volume / bias_field
     corrected[~brain_mask] = 0.0
     return corrected
@@ -89,7 +93,6 @@ def otsu_brain_masking(volume):
     """Otsu Adaptive Brain Masking: Erases skull, fat, and non-brain tissue"""
     brain_mask = np.zeros_like(volume, dtype=bool)
     
-    # Process slice by slice along axial plane
     for z in range(volume.shape[2]):
         slice_img = volume[:, :, z]
         if np.max(slice_img) == 0:
@@ -177,7 +180,6 @@ for _, row in nyu_df.iterrows():
     volume = crop_brain(volume)              # 3. Bounding Box Cropping
     volume = z_score_normalize(volume)       # 4. Z-Score Intensity Standardization
     
-    # Extract 50-slice tensors for all 3 views
     axial_tensor = extract_50_slices(volume, axis=2)
     coronal_tensor = extract_50_slices(volume, axis=1)
     sagittal_tensor = extract_50_slices(volume, axis=0)

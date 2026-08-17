@@ -14,6 +14,7 @@ Key Features:
   5. 3D CBAM Channel-Spatial Attention Mechanism
   6. Adaptive Binary Focal Loss (gamma=2.0, alpha=0.25)
   7. LayerNorm + Dense(256) + GELU + Dropout(0.5) Classifier Head
+  8. Cross-Platform Compatibility (Lightning AI, Kaggle, Colab, Local)
 ==============================================================================
 """
 
@@ -34,8 +35,15 @@ warnings.filterwarnings('ignore')
 print("1. Initializing 3D Tensor Ecosystem...")
 GLOBAL_BATCH_SIZE = 2 
 
-data_dir = '/kaggle/working/processed_paper_3D/'
-phenotype_csv = '/kaggle/input/datasets/clintloyed/abide-autism-10x-data/ABIDE_Phenotypic.csv'
+# Cross-Platform Output Directory Configuration
+if os.path.exists('/kaggle/working'):
+    base_dir = '/kaggle/working/'
+    phenotype_csv = '/kaggle/input/datasets/clintloyed/abide-autism-10x-data/ABIDE_Phenotypic.csv'
+else:
+    base_dir = './'
+    phenotype_csv = 'https://s3.amazonaws.com/fcp-indi/data/Projects/ABIDE_Initiative/Phenotypic_V1_0b_preprocessed1.csv'
+
+data_dir = os.path.join(base_dir, 'processed_paper_3D')
 
 print("2. Loading Clinical Metadata (Multi-Site: NYU, UM_1, USM)...")
 df = pd.read_csv(phenotype_csv)
@@ -173,8 +181,9 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(X_ax, y), 1):
     
     model = build_paper_3d_cnn()
     
+    checkpoint_filepath = os.path.join(base_dir, f'Paper_3D_GodMode_Fold{fold}.keras')
     checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
-        filepath=f'/kaggle/working/Paper_3D_GodMode_Fold{fold}.keras',
+        filepath=checkpoint_filepath,
         monitor='val_accuracy',
         save_best_only=True,
         mode='max',
@@ -188,7 +197,7 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(X_ax, y), 1):
         callbacks=[checkpoint_callback]
     )
     
-    model.load_weights(f'/kaggle/working/Paper_3D_GodMode_Fold{fold}.keras')
+    model.load_weights(checkpoint_filepath)
     y_pred_prob = model.predict(val_ds)
     y_pred = (y_pred_prob > 0.5).astype(int)
     fold_acc = accuracy_score(y_val, y_pred)
