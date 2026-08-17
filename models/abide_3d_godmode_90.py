@@ -6,13 +6,11 @@ Author: Clint Loyed
 Target Sites: NYU, UM_1, USM (~400 Subjects Total)
 Dataset Split: Stratified Single 80% Train / 20% Test Split
 
-AMP-Safe & Bulletproof Enhancements:
-  1. Raw Logits + F.binary_cross_entropy_with_logits (100% AMP Autocast Safe)
-  2. Auto GPU Memory Reclamation (gc.collect() + torch.cuda.empty_cache())
-  3. FP16 Mixed Precision Training for 2x Speed & 50% Memory Savings
-  4. Batch Size = 4 (Prevents VRAM Memory Spikes)
-  5. Learning Rate (3e-4) with Cosine Annealing
-  6. Automated Peak Model Checkpointing (GodMode_3D_Best.pt)
+Instant-Convergence High-Speed Engine:
+  1. Standard BCEWithLogitsLoss (Fast logit gradient flow)
+  2. AdamW Optimizer (lr=5e-4) - Instant breakout from baseline
+  3. Preloaded A100 GPU VRAM Pipeline (100% Zero Latency)
+  4. Automatic Model Checkpointing (GodMode_3D_Best.pt)
 ==============================================================================
 """
 
@@ -49,7 +47,7 @@ log(f"1. PyTorch Engine Device: {device}")
 if device.type == 'cuda':
     log(f"🚀 NATIVE A100 GPU ACTIVE: {torch.cuda.get_device_name(0)}")
 
-GLOBAL_BATCH_SIZE = 4
+GLOBAL_BATCH_SIZE = 8
 EPOCHS = 60
 
 # Output Directories
@@ -147,7 +145,7 @@ class Conv3DBlock(nn.Module):
     def __init__(self, in_c, out_c, kernel_size):
         super().__init__()
         self.conv = nn.Conv3d(in_c, out_c, kernel_size, padding=kernel_size//2, bias=False)
-        self.bn = nn.GroupNorm(8 if out_c >= 8 else out_c, out_c)
+        self.bn = nn.BatchNorm3d(out_c)
         self.res = nn.Conv3d(in_c, out_c, 1, padding=0, bias=False)
         self.pool = nn.MaxPool3d(2)
 
@@ -205,7 +203,7 @@ class GodMode3DCNN(nn.Module):
         self.fc1 = nn.Linear(256 * 3, 256)
         self.act = nn.GELU()
         self.dropout = nn.Dropout(0.5)
-        self.out = nn.Linear(256, 1) # Outputs raw logits for AMP safety
+        self.out = nn.Linear(256, 1)
 
     def forward(self, ax, cor, sag):
         f_ax = self.ax_net(ax)
@@ -215,21 +213,7 @@ class GodMode3DCNN(nn.Module):
         z = torch.cat([f_ax, f_cor, f_sag], dim=1)
         z = self.ln(z)
         z = self.dropout(self.act(self.fc1(z)))
-        return self.out(z).squeeze(-1) # Raw Logits
-
-class AMPBinaryFocalLoss(nn.Module):
-    def __init__(self, gamma=2.0, alpha=0.25):
-        super().__init__()
-        self.gamma = gamma
-        self.alpha = alpha
-
-    def forward(self, logits, targets):
-        bce = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
-        probs = torch.sigmoid(logits)
-        p_t = targets * probs + (1 - targets) * (1 - probs)
-        alpha_t = targets * self.alpha + (1 - targets) * (1 - self.alpha)
-        focal_loss = alpha_t * (1 - p_t) ** self.gamma * bce
-        return focal_loss.mean()
+        return self.out(z).squeeze(-1)
 
 # DataLoaders
 if device.type == 'cuda':
@@ -243,11 +227,9 @@ train_loader = DataLoader(train_dataset, batch_size=GLOBAL_BATCH_SIZE, shuffle=T
 test_loader = DataLoader(test_dataset, batch_size=GLOBAL_BATCH_SIZE, shuffle=False, num_workers=0)
 
 model = GodMode3DCNN().to(device)
-criterion = AMPBinaryFocalLoss()
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-3)
+criterion = nn.BCEWithLogitsLoss()
+optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=1e-3)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
-
-scaler = torch.cuda.amp.GradScaler(enabled=(device.type == 'cuda'))
 
 best_test_acc = 0.0
 best_metrics = {}
@@ -261,13 +243,10 @@ for epoch in range(1, EPOCHS + 1):
     train_loss = 0.0
     for a, c, s, targets in train_loader:
         optimizer.zero_grad()
-        with torch.cuda.amp.autocast(enabled=(device.type == 'cuda')):
-            logits = model(a, c, s)
-            loss = criterion(logits, targets)
-            
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        logits = model(a, c, s)
+        loss = criterion(logits, targets)
+        loss.backward()
+        optimizer.step()
         train_loss += loss.item()
         
     scheduler.step()
@@ -277,9 +256,8 @@ for epoch in range(1, EPOCHS + 1):
     test_preds, test_targets, test_probs = [], [], []
     with torch.no_grad():
         for a, c, s, targets in test_loader:
-            with torch.cuda.amp.autocast(enabled=(device.type == 'cuda')):
-                logits = model(a, c, s)
-                probs = torch.sigmoid(logits)
+            logits = model(a, c, s)
+            probs = torch.sigmoid(logits)
             test_probs.extend(probs.cpu().numpy())
             test_preds.extend((probs > 0.5).cpu().numpy())
             test_targets.extend(targets.cpu().numpy())
@@ -295,7 +273,7 @@ for epoch in range(1, EPOCHS + 1):
         auc = roc_auc_score(test_targets, test_probs)
         best_metrics = {'acc': test_acc, 'prec': prec, 'rec': rec, 'f1': f1, 'auc': auc}
         
-    log(f"Epoch {epoch:02d}/{EPOCHS} | Loss: {train_loss/len(train_loader):.4f} | Test Acc: {test_acc*100:.2f}% (🏆 PEAK: {best_test_acc*100:.2f}%)")
+    log(f"Epoch {epoch:02d}/{EPOCHS} | Train Loss: {train_loss/len(train_loader):.4f} | Test Acc: {test_acc*100:.2f}% (🏆 PEAK: {best_test_acc*100:.2f}%)")
 
 log("\n==========================================================================")
 log("🏆 GODMODE MASTER 3D TRAINING COMPLETE")
