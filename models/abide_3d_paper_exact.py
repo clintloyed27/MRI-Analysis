@@ -8,13 +8,17 @@ Single Train/Test Split Protocol:
   - NO Cross Validation Folds. Single Master Run.
   - Resolution: 50 middle slices @ 224x224 Full HD per slice
   - Architecture: 3-Stream Parallel Conv3D (3x3x3 & 5x5x5 kernels) + 3D CBAM
-  - Optimization: Adam (lr=1e-4, weight_decay=1e-4), BCELoss
+  - Optimization: Adam (lr=1e-4, weight_decay=1e-4), BCEWithLogitsLoss
+  - Memory: Batch Size 4 + GPU Memory Flushing (Zero CUDA OOM)
 ==============================================================================
 """
 
 import os
 import sys
 import gc
+
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
 import numpy as np
 import pandas as pd
 import torch
@@ -26,12 +30,10 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 import warnings
 warnings.filterwarnings('ignore')
 
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
-
 def log(text=""):
     print(text, flush=True)
 
-# 1. GPU Acceleration Setup
+# 1. GPU Memory Cleanup & Verification
 if torch.cuda.is_available():
     gc.collect()
     torch.cuda.empty_cache()
@@ -44,7 +46,7 @@ log(f"1. PyTorch Execution Device: {device}")
 if device.type == 'cuda':
     log(f"🚀 NATIVE A100 GPU ACTIVE: {torch.cuda.get_device_name(0)}")
 
-GLOBAL_BATCH_SIZE = 8
+GLOBAL_BATCH_SIZE = 4 # Memory-safe footprint
 EPOCHS = 60
 
 # Output Directories
@@ -199,7 +201,7 @@ class PaperHierarchical3DCNN(nn.Module):
         self.ln = nn.LayerNorm(256 * 3)
         self.fc = nn.Linear(256 * 3, 256)
         self.dropout = nn.Dropout(0.5)
-        self.out = nn.Linear(256, 1)
+        self.out = nn.Linear(256, 1) # Raw Logit output
 
     def forward(self, ax, cor, sag):
         f_ax = self.ax_net(ax)
@@ -210,7 +212,7 @@ class PaperHierarchical3DCNN(nn.Module):
         z = self.ln(z)
         z = F.gelu(self.fc(z))
         z = self.dropout(z)
-        return torch.sigmoid(self.out(z)).squeeze(-1)
+        return self.out(z).squeeze(-1) # Output raw logits
 
 # DataLoaders
 if device.type == 'cuda':
@@ -224,7 +226,7 @@ train_loader = DataLoader(train_dataset, batch_size=GLOBAL_BATCH_SIZE, shuffle=T
 test_loader = DataLoader(test_dataset, batch_size=GLOBAL_BATCH_SIZE, shuffle=False, num_workers=0)
 
 model = PaperHierarchical3DCNN().to(device)
-criterion = nn.BCELoss()
+criterion = nn.BCEWithLogitsLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-4)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
 
@@ -240,8 +242,8 @@ for epoch in range(1, EPOCHS + 1):
     train_loss = 0.0
     for a, c, s, targets in train_loader:
         optimizer.zero_grad()
-        outputs = model(a, c, s)
-        loss = criterion(outputs, targets)
+        logits = model(a, c, s)
+        loss = criterion(logits, targets)
         loss.backward()
         optimizer.step()
         train_loss += loss.item()
@@ -253,9 +255,10 @@ for epoch in range(1, EPOCHS + 1):
     test_preds, test_targets, test_probs = [], [], []
     with torch.no_grad():
         for a, c, s, targets in test_loader:
-            outputs = model(a, c, s)
-            test_probs.extend(outputs.cpu().numpy())
-            test_preds.extend((outputs > 0.5).cpu().numpy())
+            logits = model(a, c, s)
+            probs = torch.sigmoid(logits)
+            test_probs.extend(probs.cpu().numpy())
+            test_preds.extend((probs > 0.5).cpu().numpy())
             test_targets.extend(targets.cpu().numpy())
             
     test_acc = accuracy_score(test_targets, test_preds)
