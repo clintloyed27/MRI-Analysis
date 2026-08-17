@@ -1,20 +1,22 @@
 """
 ==============================================================================
-ABIDE-I 3D Hierarchical Multi-Planar Convolutional Neural Network (Multi-Site)
+ABIDE-I 3D Hierarchical Multi-Planar Conv3D Neural Network (224x224 Full HD)
 ------------------------------------------------------------------------------
 Author: Clint Loyed
 Target Sites: NYU, UM_1, USM (~400 Subjects Total)
+Target Resolution: Full HD (224, 224) 3D Volumetric Tensors
 Based on the sMRI 3D Architecture by Hammash & Younis (2026)
 
 Key Features:
-  1. True 3D Convolutions (Conv3D) over 50-slice spatial volumes
+  1. True 3D Convolutions (Conv3D) over 50-slice (50, 224, 224, 1) spatial volumes
   2. Alternating kernel sizes (3x3x3 for fine features, 5x5x5 for coarse structures)
   3. Hierarchical Channel Scaling (32 -> 64 -> 128 -> 256)
   4. ResNet-Style Skip Connections
   5. 3D CBAM Channel-Spatial Attention Mechanism
   6. Adaptive Binary Focal Loss (gamma=2.0, alpha=0.25)
-  7. LayerNorm + Dense(256) + GELU + Dropout(0.5) Classifier Head
-  8. Cross-Platform Compatibility (Lightning AI, Kaggle, Colab, Local)
+  7. Cosine Annealing Learning Rate Scheduler (1e-4 down to 1e-6)
+  8. 3D Volume Augmentation (Random Flipping + Scale Normalization)
+  9. LayerNorm + Dense(256) + GELU + Dropout(0.5) Classifier Head
 ==============================================================================
 """
 
@@ -27,14 +29,15 @@ from tensorflow.keras.layers import (Input, Dense, Dropout, Concatenate, Add,
                                      Conv3D, MaxPooling3D, GlobalAveragePooling3D, 
                                      GlobalMaxPooling3D, Activation, LayerNormalization, BatchNormalization, Reshape)
 from tensorflow.keras.models import Model
+from tensorflow.keras.regularizers import l2
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import accuracy_score
 import warnings
 warnings.filterwarnings('ignore')
 
-print("1. Initializing 3D Tensor Ecosystem...")
-# Optimized batch size for Lightning AI / Enterprise GPUs (A100, L4, L40S)
-GLOBAL_BATCH_SIZE = 8 
+print("1. Initializing 224x224 Full HD 3D Tensor Ecosystem...")
+GLOBAL_BATCH_SIZE = 8 # Optimized for Enterprise GPUs (A100 / L4 / L40S)
+EPOCHS = 50
 
 # Cross-Platform Output Directory Configuration
 if os.path.exists('/kaggle/working'):
@@ -44,15 +47,18 @@ else:
     base_dir = './'
     phenotype_csv = 'https://s3.amazonaws.com/fcp-indi/data/Projects/ABIDE_Initiative/Phenotypic_V1_0b_preprocessed1.csv'
 
-data_dir = os.path.join(base_dir, 'processed_paper_3D')
+# Try 224x224 folder first, fall back to default
+if os.path.exists(os.path.join(base_dir, 'processed_paper_3D_224')):
+    data_dir = os.path.join(base_dir, 'processed_paper_3D_224')
+else:
+    data_dir = os.path.join(base_dir, 'processed_paper_3D')
 
-print("2. Loading Clinical Metadata (Multi-Site: NYU, UM_1, USM)...")
+print(f"📁 Ingesting tensors from: '{data_dir}'...")
 df = pd.read_csv(phenotype_csv)
 TARGET_SITES = ['NYU', 'UM_1', 'USM']
 df = df[df['SITE_ID'].isin(TARGET_SITES)].dropna(subset=['DX_GROUP'])
 label_dict = {str(row['SUB_ID']).zfill(7): 1 if row['DX_GROUP'] == 1 else 0 for _, row in df.iterrows()}
 
-print("3. Ingesting 3D NumPy Volume Tensors (Axial, Coronal, Sagittal)...")
 X_ax, X_cor, X_sag, y = [], [], [], []
 
 for patient_id in os.listdir(data_dir):
@@ -75,8 +81,12 @@ for patient_id in os.listdir(data_dir):
 X_ax, X_cor, X_sag = np.array(X_ax), np.array(X_cor), np.array(X_sag)
 y = np.array(y)
 
-print(f"✅ Total Multi-Site 3D Volume Tensors Loaded: {len(X_ax)}")
+print(f"✅ Total 224x224 Full HD 3D Volume Tensors Loaded: {len(X_ax)}")
+print(f"   Shape per tensor: {X_ax.shape[1:]}")
 print(f"   Autism (1): {np.sum(y == 1)}, Healthy Control (0): {np.sum(y == 0)}")
+
+# Dynamic Input Shape Detection
+tensor_shape = X_ax.shape[1:] # e.g. (50, 224, 224, 1) or (50, 128, 128, 1)
 
 def binary_focal_loss(gamma=2.0, alpha=0.25):
     """Adaptive Focal Loss targeting difficult borderline subjects"""
@@ -89,14 +99,14 @@ def binary_focal_loss(gamma=2.0, alpha=0.25):
         return tf.reduce_mean(alpha_factor * modulating_factor * bce)
     return focal_loss_fn
 
-def build_paper_3d_cnn():
-    ax_input = Input(shape=(50, 128, 128, 1), name='axial')
-    cor_input = Input(shape=(50, 128, 128, 1), name='coronal')
-    sag_input = Input(shape=(50, 128, 128, 1), name='sagittal')
+def build_paper_3d_cnn(input_shape):
+    ax_input = Input(shape=input_shape, name='axial')
+    cor_input = Input(shape=input_shape, name='coronal')
+    sag_input = Input(shape=input_shape, name='sagittal')
     
     def hierarchical_block(x, filters, kernel_size):
-        res = Conv3D(filters, 1, padding='same', use_bias=False)(x)
-        x = Conv3D(filters, kernel_size, padding='same', use_bias=False)(x)
+        res = Conv3D(filters, 1, padding='same', use_bias=False, kernel_regularizer=l2(1e-4))(x)
+        x = Conv3D(filters, kernel_size, padding='same', use_bias=False, kernel_regularizer=l2(1e-4))(x)
         x = BatchNormalization()(x)
         x = Activation('relu')(x)
         x = Add()([x, res])
@@ -137,12 +147,20 @@ def build_paper_3d_cnn():
     
     z = Concatenate()([ax_feat, cor_feat, sag_feat])
     z = LayerNormalization()(z)
-    z = Dense(256, activation='gelu')(z)
+    z = Dense(256, activation='gelu', kernel_regularizer=l2(1e-4))(z)
     z = Dropout(0.5)(z)
     predictions = Dense(1, activation='sigmoid')(z)
     
     model = Model(inputs=[ax_input, cor_input, sag_input], outputs=predictions)
-    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4), 
+    
+    # Cosine Annealing Learning Rate Schedule
+    lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
+        initial_learning_rate=1e-4,
+        decay_steps=EPOCHS * (len(X_ax) // GLOBAL_BATCH_SIZE),
+        alpha=0.01
+    )
+    
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=lr_schedule), 
                   loss=binary_focal_loss(), 
                   metrics=['accuracy'])
     return model
@@ -152,17 +170,26 @@ skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 fold_scores = []
 
 def augment_3d_tensors(inputs, label):
+    """3D Volume Augmentation: Random scale + random horizontal flip"""
     scale = tf.random.uniform([], 0.9, 1.1)
+    flip = tf.random.uniform([], 0.0, 1.0) > 0.5
+    
+    def apply_aug(tensor):
+        t = tensor * scale
+        if flip:
+            t = tf.image.flip_left_right(t)
+        return t
+
     aug_inputs = {
-        'axial': inputs['axial'] * scale,
-        'coronal': inputs['coronal'] * scale,
-        'sagittal': inputs['sagittal'] * scale
+        'axial': apply_aug(inputs['axial']),
+        'coronal': apply_aug(inputs['coronal']),
+        'sagittal': apply_aug(inputs['sagittal'])
     }
     return aug_inputs, label
 
 for fold, (train_idx, val_idx) in enumerate(skf.split(X_ax, y), 1):
     print(f"\n==========================================")
-    print(f"🔥 TRAINING FOLD {fold} / 5 (MULTI-SITE 3D MODE)")
+    print(f"🔥 TRAINING FOLD {fold} / 5 (224x224 Full HD Mode)")
     print(f"==========================================")
     
     tf.keras.backend.clear_session()
@@ -180,9 +207,9 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(X_ax, y), 1):
         ({'axial': X_ax_v, 'coronal': X_cor_v, 'sagittal': X_sag_v}, y_val)
     ).batch(GLOBAL_BATCH_SIZE)
     
-    model = build_paper_3d_cnn()
+    model = build_paper_3d_cnn(tensor_shape)
     
-    checkpoint_filepath = os.path.join(base_dir, f'Paper_3D_GodMode_Fold{fold}.keras')
+    checkpoint_filepath = os.path.join(base_dir, f'Paper_3D_224HD_Fold{fold}.keras')
     checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
         filepath=checkpoint_filepath,
         monitor='val_accuracy',
@@ -194,7 +221,7 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(X_ax, y), 1):
     model.fit(
         train_ds,
         validation_data=val_ds,
-        epochs=30, 
+        epochs=EPOCHS, 
         callbacks=[checkpoint_callback]
     )
     
@@ -203,11 +230,11 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(X_ax, y), 1):
     y_pred = (y_pred_prob > 0.5).astype(int)
     fold_acc = accuracy_score(y_val, y_pred)
     fold_scores.append(fold_acc)
-    print(f"\n✅ Fold {fold} Multi-Site 3D Validation Accuracy: {fold_acc:.4f}")
+    print(f"\n✅ Fold {fold} 224x224 Full HD Validation Accuracy: {fold_acc:.4f}")
 
 print("\n==============================================")
-print("🏆 MULTI-SITE 3D MULTI-PLANAR 5-FOLD CV COMPLETE")
+print("🏆 224x224 Full HD 3D MULTI-PLANAR 5-FOLD CV COMPLETE")
 print("==============================================")
 for i, score in enumerate(fold_scores, 1):
     print(f"Fold {i}: {score*100:.2f}%")
-print(f"🌟 FINAL MULTI-SITE 3D AVERAGE ACCURACY: {np.mean(fold_scores)*100:.2f}%")
+print(f"🌟 FINAL FULL HD 3D AVERAGE ACCURACY: {np.mean(fold_scores)*100:.2f}%")

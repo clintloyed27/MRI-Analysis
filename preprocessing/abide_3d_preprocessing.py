@@ -1,17 +1,18 @@
 """
 ==============================================================================
-ABIDE-I Structural MRI 3D Multi-Planar Preprocessing Pipeline (Gold-Standard)
+ABIDE-I Structural MRI 3D Multi-Planar Preprocessing Pipeline (224x224 Full HD)
 ------------------------------------------------------------------------------
 Author: Clint Loyed
 Target Sites: NYU, UM_1, USM (~400 Subjects Total)
+Target Resolution: Full HD (224, 224) 3D Tensors
 
-Gold-Standard Pipeline Enhancements:
+Gold-Standard Pipeline Steps:
   1. Multi-Threaded AWS S3 Downloader (20s Timeout Protection)
   2. N4 Bias Field Correction Proxy (Low-frequency magnetic field shading removal)
   3. Otsu Adaptive Tissue Masking (Pure brain tissue isolation, erasing skull/fat)
   4. Bounding Box Skull Stripping & Cropping
   5. Z-Score Intensity Normalization & Outlier Truncation [-3, 3]
-  6. 50-Slice Multi-Planar Extraction (Axial, Coronal, Sagittal) -> 3D .npy Tensors
+  6. 50-Slice Multi-Planar Extraction (Axial, Coronal, Sagittal) -> (50, 224, 224, 1) .npy Tensors
   7. Cross-Platform Compatibility (Lightning AI, Kaggle, Colab, Local)
 ==============================================================================
 """
@@ -34,7 +35,7 @@ else:
     base_dir = './'
 
 raw_dir = os.path.join(base_dir, 'raw_abide_multi')
-output_dir = os.path.join(base_dir, 'processed_paper_3D')
+output_dir = os.path.join(base_dir, 'processed_paper_3D_224')
 os.makedirs(raw_dir, exist_ok=True)
 os.makedirs(output_dir, exist_ok=True)
 
@@ -45,7 +46,7 @@ csv_url = "https://s3.amazonaws.com/fcp-indi/data/Projects/ABIDE_Initiative/Phen
 df = pd.read_csv(csv_url)
 nyu_df = df[df['SITE_ID'].isin(TARGET_SITES)].copy()
 nyu_df['PADDED_ID'] = nyu_df['SUB_ID'].astype(str).str.zfill(7)
-print(f"🚀 Found {len(nyu_df)} total subjects across {TARGET_SITES}. Targeting for 3D Gold-Standard processing...")
+print(f"🚀 Found {len(nyu_df)} total subjects across {TARGET_SITES}. Processing into 224x224 Full HD 3D Tensors...")
 
 def download_patient(row):
     site = row['SITE_ID']
@@ -133,8 +134,8 @@ def z_score_normalize(volume):
     normalized = np.clip(normalized, -3, 3) # Outlier truncation [-3, 3]
     return normalized
 
-def extract_50_slices(volume, axis, target_size=(128, 128), num_slices=50):
-    """Extracts 50 middle slices along specified axis (0=Sagittal, 1=Coronal, 2=Axial)"""
+def extract_50_slices(volume, axis, target_size=(224, 224), num_slices=50):
+    """Extracts 50 middle slices along specified axis (0=Sagittal, 1=Coronal, 2=Axial) into 224x224 Full HD"""
     center = volume.shape[axis] // 2
     start = max(0, center - (num_slices // 2))
     end = min(volume.shape[axis], center + (num_slices // 2))
@@ -155,8 +156,8 @@ def extract_50_slices(volume, axis, target_size=(128, 128), num_slices=50):
         
     return extracted_tensor
 
-# 3. Gold-Standard Batch Processing Pipeline
-print("\n🚀 Executing Gold-Standard 3D Multi-Planar Processing Pipeline...")
+# 3. Full HD Batch Processing Pipeline
+print("\n🚀 Executing 224x224 Full HD Gold-Standard 3D Processing Pipeline...")
 processed_count = 0
 
 for _, row in nyu_df.iterrows():
@@ -180,9 +181,10 @@ for _, row in nyu_df.iterrows():
     volume = crop_brain(volume)              # 3. Bounding Box Cropping
     volume = z_score_normalize(volume)       # 4. Z-Score Intensity Standardization
     
-    axial_tensor = extract_50_slices(volume, axis=2)
-    coronal_tensor = extract_50_slices(volume, axis=1)
-    sagittal_tensor = extract_50_slices(volume, axis=0)
+    # Extract 224x224 Full HD 50-slice tensors for all 3 views
+    axial_tensor = extract_50_slices(volume, axis=2, target_size=(224, 224))
+    coronal_tensor = extract_50_slices(volume, axis=1, target_size=(224, 224))
+    sagittal_tensor = extract_50_slices(volume, axis=0, target_size=(224, 224))
     
     np.save(os.path.join(out_folder, "axial_50.npy"), axial_tensor)
     np.save(os.path.join(out_folder, "coronal_50.npy"), coronal_tensor)
@@ -190,6 +192,6 @@ for _, row in nyu_df.iterrows():
     
     processed_count += 1
     if processed_count % 20 == 0:
-        print(f"⚙️ Processed {processed_count} subjects with Gold-Standard pipeline...")
+        print(f"⚙️ Processed {processed_count} subjects into 224x224 Full HD tensors...")
 
-print(f"\n🎉 SUCCESS! Fully processed {processed_count} subjects into Gold-Standard 3D Tensors in '{output_dir}'.")
+print(f"\n🎉 SUCCESS! Fully processed {processed_count} subjects into 224x224 Full HD 3D Tensors in '{output_dir}'.")
