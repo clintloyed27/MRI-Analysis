@@ -6,20 +6,17 @@ Author: Clint Loyed
 Target Sites: NYU, UM_1, USM (~400 Subjects Total)
 Dataset Split: Stratified Single 80% Train / 20% Test Split (No Cross Validation)
 
-Architectural & Optimization Enhancements:
-  1. 3D ConvNeXt-Style Hierarchical Depthwise-Separable Convolutions
-  2. 3D CBAM Dual Spatial-Channel Attention (Isolating Amygdala/Cortical Biomarkers)
-  3. Preloaded GPU VRAM Ultra-Speed Pipeline (100% Zero Latency)
-  4. Advanced 3D Augmentation (Affine Rotations +/-15 deg, Scale, Horizontal Flip, Mixup)
-  5. Cosine Annealing with Warm Restarts (T_0=15, T_mult=2)
-  6. Label Smoothing (0.05) + Adaptive Binary Focal Loss (gamma=2.0, alpha=0.25)
-  7. Automated Peak Test Model Checkpointing (GodMode_3D_Best.pt)
+Optimized Engine:
+  1. Higher Learning Rate Warmup (3e-4) to break majority class 0.5 threshold on Epoch 2
+  2. 3D ResNet-CBAM Dual Spatial-Channel Attention
+  3. Preloaded GPU VRAM Ultra-Speed Pipeline
+  4. Advanced 3D Augmentation (Scale, Horizontal Flip, Mixup)
+  5. Cosine Annealing Scheduler (3e-4 down to 1e-6)
 ==============================================================================
 """
 
 import os
 import sys
-import math
 import numpy as np
 import pandas as pd
 import torch
@@ -46,7 +43,7 @@ if device.type == 'cuda':
     log(f"🚀 NATIVE A100 GPU ACTIVE: {torch.cuda.get_device_name(0)}")
 
 GLOBAL_BATCH_SIZE = 8
-EPOCHS = 80
+EPOCHS = 60
 
 # Output Directories
 if os.path.exists('/kaggle/working'):
@@ -105,7 +102,7 @@ X_ax_tr, X_ax_te, X_cor_tr, X_cor_te, X_sag_tr, X_sag_te, y_tr, y_te = train_tes
 
 log(f"📊 Training Set: {len(y_tr)} subjects | Test Set: {len(y_te)} subjects")
 
-# ⚡ Preload ENTIRE dataset onto GPU VRAM
+# Preload ENTIRE dataset onto GPU VRAM
 if device.type == 'cuda':
     log("⚡ Preloading 100% of Train/Test 3D Dataset onto A100 GPU VRAM...")
     tr_ax = torch.tensor(X_ax_tr, device=device)
@@ -139,33 +136,26 @@ class GodModeDataset(Dataset):
                 a, c, s = torch.flip(a, [-1]), torch.flip(c, [-1]), torch.flip(s, [-1])
         return a, c, s, self.labels[idx]
 
-# 3D ConvNeXt-Style Depthwise Separable Block
-class ConvNeXt3DBlock(nn.Module):
-    def __init__(self, dim):
+class Conv3DBlock(nn.Module):
+    def __init__(self, in_c, out_c, kernel_size):
         super().__init__()
-        self.dwconv = nn.Conv3d(dim, dim, kernel_size=7, padding=3, groups=dim)
-        self.norm = nn.GroupNorm(8 if dim >= 8 else dim, dim)
-        self.pwconv1 = nn.Linear(dim, 4 * dim)
-        self.act = nn.GELU()
-        self.pwconv2 = nn.Linear(4 * dim, dim)
+        self.conv = nn.Conv3d(in_c, out_c, kernel_size, padding=kernel_size//2, bias=False)
+        self.bn = nn.GroupNorm(8 if out_c >= 8 else out_c, out_c)
+        self.res = nn.Conv3d(in_c, out_c, 1, padding=0, bias=False)
+        self.pool = nn.MaxPool3d(2)
 
     def forward(self, x):
-        input_tensor = x
-        x = self.dwconv(x)
-        x = self.norm(x)
-        x = x.permute(0, 2, 3, 4, 1) # (N, C, D, H, W) -> (N, D, H, W, C)
-        x = self.pwconv1(x)
-        x = self.act(x)
-        x = self.pwconv2(x)
-        x = x.permute(0, 4, 1, 2, 3) # (N, D, H, W, C) -> (N, C, D, H, W)
-        return input_tensor + x
+        res = self.res(x)
+        out = F.relu(self.bn(self.conv(x)))
+        out = self.pool(out + res)
+        return out
 
 class CBAM3D(nn.Module):
     def __init__(self, channels):
         super().__init__()
         self.fc1 = nn.Linear(channels, channels // 8)
         self.fc2 = nn.Linear(channels // 8, channels)
-        self.spatial_conv = nn.Conv3d(2, 1, 7, padding=3)
+        self.spatial_conv = nn.Conv3d(2, 1, 3, padding=1)
 
     def forward(self, x):
         b, c, _, _, _ = x.size()
@@ -179,58 +169,36 @@ class CBAM3D(nn.Module):
         sa = torch.sigmoid(self.spatial_conv(torch.cat([sa_avg, sa_max], dim=1)))
         return x * sa
 
-class View3DGodModeExtractor(nn.Module):
+class View3DFeatureExtractor(nn.Module):
     def __init__(self):
         super().__init__()
-        self.stem = nn.Sequential(
-            nn.Conv3d(1, 32, kernel_size=4, stride=2, padding=1),
-            nn.GroupNorm(8, 32)
-        )
-        self.stage1 = ConvNeXt3DBlock(32)
-        self.down1 = nn.Sequential(
-            nn.Conv3d(32, 64, kernel_size=2, stride=2),
-            nn.GroupNorm(8, 64)
-        )
-        self.stage2 = ConvNeXt3DBlock(64)
-        self.down2 = nn.Sequential(
-            nn.Conv3d(64, 128, kernel_size=2, stride=2),
-            nn.GroupNorm(8, 128)
-        )
-        self.stage3 = ConvNeXt3DBlock(128)
-        self.down3 = nn.Sequential(
-            nn.Conv3d(128, 256, kernel_size=2, stride=2),
-            nn.GroupNorm(8, 256)
-        )
-        self.stage4 = ConvNeXt3DBlock(256)
+        self.b1 = Conv3DBlock(1, 32, 3)
+        self.b2 = Conv3DBlock(32, 64, 5)
+        self.b3 = Conv3DBlock(64, 128, 3)
+        self.b4 = Conv3DBlock(128, 256, 5)
         self.cbam = CBAM3D(256)
         self.gap = nn.AdaptiveAvgPool3d(1)
 
     def forward(self, x):
-        x = self.stem(x)
-        x = self.stage1(x)
-        x = self.down1(x)
-        x = self.stage2(x)
-        x = self.down2(x)
-        x = self.stage3(x)
-        x = self.down3(x)
-        x = self.stage4(x)
+        x = self.b1(x)
+        x = self.b2(x)
+        x = self.b3(x)
+        x = self.b4(x)
         x = self.cbam(x)
         return self.gap(x).view(x.size(0), -1)
 
 class GodMode3DCNN(nn.Module):
     def __init__(self):
         super().__init__()
-        self.ax_net = View3DGodModeExtractor()
-        self.cor_net = View3DGodModeExtractor()
-        self.sag_net = View3DGodModeExtractor()
+        self.ax_net = View3DFeatureExtractor()
+        self.cor_net = View3DFeatureExtractor()
+        self.sag_net = View3DFeatureExtractor()
         
         self.ln = nn.LayerNorm(256 * 3)
-        self.fc1 = nn.Linear(256 * 3, 512)
+        self.fc1 = nn.Linear(256 * 3, 256)
         self.act = nn.GELU()
-        self.dropout1 = nn.Dropout(0.5)
-        self.fc2 = nn.Linear(512, 128)
-        self.dropout2 = nn.Dropout(0.3)
-        self.out = nn.Linear(128, 1)
+        self.dropout = nn.Dropout(0.5)
+        self.out = nn.Linear(256, 1)
 
     def forward(self, ax, cor, sag):
         f_ax = self.ax_net(ax)
@@ -239,20 +207,17 @@ class GodMode3DCNN(nn.Module):
         
         z = torch.cat([f_ax, f_cor, f_sag], dim=1)
         z = self.ln(z)
-        z = self.dropout1(self.act(self.fc1(z)))
-        z = self.dropout2(self.act(self.fc2(z)))
+        z = self.dropout(self.act(self.fc1(z)))
         return torch.sigmoid(self.out(z)).squeeze(-1)
 
-class FocalLossWithLabelSmoothing(nn.Module):
-    def __init__(self, gamma=2.0, alpha=0.25, smoothing=0.05):
+class BinaryFocalLoss(nn.Module):
+    def __init__(self, gamma=2.0, alpha=0.25):
         super().__init__()
         self.gamma = gamma
         self.alpha = alpha
-        self.smoothing = smoothing
 
     def forward(self, preds, targets):
-        smoothed_targets = targets * (1.0 - self.smoothing) + 0.5 * self.smoothing
-        bce = F.binary_cross_entropy(preds, smoothed_targets, reduction='none')
+        bce = F.binary_cross_entropy(preds, targets, reduction='none')
         p_t = targets * preds + (1 - targets) * (1 - preds)
         alpha_t = targets * self.alpha + (1 - targets) * (1 - self.alpha)
         focal_loss = alpha_t * (1 - p_t) ** self.gamma * bce
@@ -270,9 +235,9 @@ train_loader = DataLoader(train_dataset, batch_size=GLOBAL_BATCH_SIZE, shuffle=T
 test_loader = DataLoader(test_dataset, batch_size=GLOBAL_BATCH_SIZE, shuffle=False, num_workers=0)
 
 model = GodMode3DCNN().to(device)
-criterion = FocalLossWithLabelSmoothing(smoothing=0.05)
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-2)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=15, T_mult=2, eta_min=1e-6)
+criterion = BinaryFocalLoss()
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-3)
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
 
 best_test_acc = 0.0
 best_metrics = {}
