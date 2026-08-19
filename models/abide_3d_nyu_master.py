@@ -133,17 +133,21 @@ if device.type == 'cuda':
 # 2. PyTorch Dataset with Paper Spec 3D Augmentation
 class PaperNYUDataset(Dataset):
     def __init__(self, ax, cor, sag, labels, augment=False):
-        self.ax = torch.as_tensor(ax, dtype=torch.float32, device=device)
-        self.cor = torch.as_tensor(cor, dtype=torch.float32, device=device)
-        self.sag = torch.as_tensor(sag, dtype=torch.float32, device=device)
-        self.labels = torch.as_tensor(labels, dtype=torch.float32, device=device)
+        self.ax = torch.as_tensor(ax, dtype=torch.float32)
+        self.cor = torch.as_tensor(cor, dtype=torch.float32)
+        self.sag = torch.as_tensor(sag, dtype=torch.float32)
+        self.labels = torch.as_tensor(labels, dtype=torch.float32)
         self.augment = augment
 
     def __len__(self):
         return len(self.labels)
 
     def __getitem__(self, idx):
-        a, c, s = self.ax[idx], self.cor[idx], self.sag[idx]
+        a = self.ax[idx].to(device)
+        c = self.cor[idx].to(device)
+        s = self.sag[idx].to(device)
+        y_val = self.labels[idx].to(device)
+        
         if self.augment:
             # Paper spec: Random spatial intensity scale [0.9, 1.1] & horizontal/vertical flips
             scale = torch.empty(1, device=device).uniform_(0.9, 1.1)
@@ -152,7 +156,7 @@ class PaperNYUDataset(Dataset):
                 a, c, s = torch.flip(a, [-1]), torch.flip(c, [-1]), torch.flip(s, [-1])
             if torch.rand(1, device=device).item() > 0.5:
                 a, c, s = torch.flip(a, [-2]), torch.flip(c, [-2]), torch.flip(s, [-2])
-        return a, c, s, self.labels[idx]
+        return a, c, s, y_val
 
 # 3. Exact Paper Architecture Components (3D-HCNN)
 
