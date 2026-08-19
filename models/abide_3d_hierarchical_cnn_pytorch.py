@@ -51,13 +51,16 @@ GLOBAL_BATCH_SIZE = 8
 EPOCHS = 50
 
 # Output Directories
+if os.path.exists('/kaggle/working'):
+    base_dir = '/kaggle/working/'
+else:
+    base_dir = './'
+
 if os.path.exists('./data/ABIDE_Phenotypic.csv'):
     phenotype_csv = './data/ABIDE_Phenotypic.csv'
 elif os.path.exists('/kaggle/working'):
-    base_dir = '/kaggle/working/'
     phenotype_csv = '/kaggle/input/datasets/clintloyed/abide-autism-10x-data/ABIDE_Phenotypic.csv'
 else:
-    base_dir = './'
     phenotype_csv = 'https://s3.amazonaws.com/fcp-indi/data/Projects/ABIDE_Initiative/Phenotypic_V1_0b_preprocessed1.csv'
 
 if os.path.exists(os.path.join(base_dir, 'processed_paper_3D_224')):
