@@ -1,17 +1,16 @@
 """
 ==============================================================================
-ABIDE-I Single-Site NYU 3D Multi-Planar Framework (Master Pipeline)
+ABIDE-I Single-Site NYU 3D Multi-Planar Framework (Pristine Logits Master Pipeline)
 ------------------------------------------------------------------------------
 Author: Clint Loyed
 Target Site: NYU Langone Medical Center Alone (N=184 Subjects: 79 ASD vs 105 NC)
 
 Exact Paper Protocol:
   - Dataset: NYU Cohort Alone (Zero inter-site scanner variability)
-  - Train/Test Partition: Subject-level 80% Train (148 subjects) / 20% Test (36 subjects)
+  - Train/Test Partition: Subject-level 80% Train (147 subjects) / 20% Test (37 subjects)
   - Resolution: 50 middle slices per plane @ 224x224 Full HD
   - Architecture: 3D-HCNN (3-Stream Parallel Conv3D + 3D CBAM + Residual Skip Connections)
-  - Optimization: Adam (lr=1e-4, weight_decay=1e-4), Adaptive Focal Loss (gamma=2.0, alpha=0.25)
-  - Augmentations: Random 3D spatial rotations (+/- 10 deg), Flips (p=0.5), Scale [0.9, 1.1]
+  - Loss: Numerically Stable Logit BCE (F.binary_cross_entropy_with_logits)
 ==============================================================================
 """
 
@@ -107,7 +106,7 @@ y = np.array(y, dtype=np.float32)
 log(f"✅ Total 3D NYU Volume Scans Loaded: {len(X_ax)}")
 log(f"   Autism (1): {int(np.sum(y == 1))}, Healthy Control (0): {int(np.sum(y == 0))}")
 
-# Exact Paper Subject-Level 80% Train / 20% Test Split (148 Train / 36 Test)
+# Exact Paper Subject-Level 80% Train / 20% Test Split (147 Train / 37 Test)
 X_ax_tr, X_ax_te, X_cor_tr, X_cor_te, X_sag_tr, X_sag_te, y_tr, y_te = train_test_split(
     X_ax, X_cor, X_sag, y, test_size=0.20, random_state=42, stratify=y
 )
@@ -115,20 +114,6 @@ X_ax_tr, X_ax_te, X_cor_tr, X_cor_te, X_sag_tr, X_sag_te, y_tr, y_te = train_tes
 log(f"📊 NYU Training Set: {len(y_tr)} subjects | NYU Test Set: {len(y_te)} subjects")
 log(f"   Train Breakdown: ASD={int(np.sum(y_tr==1))}, NC={int(np.sum(y_tr==0))}")
 log(f"   Test Breakdown : ASD={int(np.sum(y_te==1))}, NC={int(np.sum(y_te==0))}")
-
-# ⚡ Preload 100% of NYU Dataset into A100 GPU VRAM
-if device.type == 'cuda':
-    log("⚡ Preloading 100% of NYU 3D Dataset onto A100 GPU VRAM...")
-    tr_ax = torch.tensor(X_ax_tr, device=device)
-    tr_cor = torch.tensor(X_cor_tr, device=device)
-    tr_sag = torch.tensor(X_sag_tr, device=device)
-    tr_y = torch.tensor(y_tr, device=device)
-    
-    te_ax = torch.tensor(X_ax_te, device=device)
-    te_cor = torch.tensor(X_cor_te, device=device)
-    te_sag = torch.tensor(X_sag_te, device=device)
-    te_y = torch.tensor(y_te, device=device)
-    log("🚀 GPU VRAM Preload Complete!")
 
 # 2. PyTorch Dataset with Paper Spec 3D Augmentation
 class PaperNYUDataset(Dataset):
@@ -143,24 +128,22 @@ class PaperNYUDataset(Dataset):
         return len(self.labels)
 
     def __getitem__(self, idx):
-        a = self.ax[idx].to(device)
-        c = self.cor[idx].to(device)
-        s = self.sag[idx].to(device)
-        y_val = self.labels[idx].to(device)
+        a = self.ax[idx]
+        c = self.cor[idx]
+        s = self.sag[idx]
+        label = self.labels[idx]
         
         if self.augment:
-            # Paper spec: Random spatial intensity scale [0.9, 1.1] & horizontal/vertical flips
-            scale = torch.empty(1, device=device).uniform_(0.9, 1.1)
+            scale = torch.empty(1).uniform_(0.9, 1.1)
             a, c, s = a * scale, c * scale, s * scale
-            if torch.rand(1, device=device).item() > 0.5:
+            if torch.rand(1).item() > 0.5:
                 a, c, s = torch.flip(a, [-1]), torch.flip(c, [-1]), torch.flip(s, [-1])
-            if torch.rand(1, device=device).item() > 0.5:
+            if torch.rand(1).item() > 0.5:
                 a, c, s = torch.flip(a, [-2]), torch.flip(c, [-2]), torch.flip(s, [-2])
-        return a, c, s, y_val
+        return a, c, s, label
 
 # 3. Exact Paper Architecture Components (3D-HCNN)
 
-# Conv3D Residual Block (Alternating 3x3x3 and 5x5x5 kernels)
 class Conv3DBlock(nn.Module):
     def __init__(self, in_c, out_c, kernel_size):
         super().__init__()
@@ -175,7 +158,6 @@ class Conv3DBlock(nn.Module):
         out = self.pool(out + res)
         return out
 
-# 3D CBAM Dual Channel-Spatial Attention Module
 class CBAM3D(nn.Module):
     def __init__(self, channels, reduction=8):
         super().__init__()
@@ -195,7 +177,6 @@ class CBAM3D(nn.Module):
         sa = torch.sigmoid(self.spatial_conv(torch.cat([sa_avg, sa_max], dim=1)))
         return x * sa
 
-# Single View 3D Feature Extraction Stream
 class View3DFeatureExtractor(nn.Module):
     def __init__(self):
         super().__init__()
@@ -214,7 +195,6 @@ class View3DFeatureExtractor(nn.Module):
         x = self.cbam(x)
         return self.gap(x).view(x.size(0), -1)
 
-# Full 3-Stream Multi-Planar Hierarchical CNN
 class Hierarchical3DCNN(nn.Module):
     def __init__(self):
         super().__init__()
@@ -236,36 +216,21 @@ class Hierarchical3DCNN(nn.Module):
         z = self.ln(z)
         z = F.gelu(self.fc(z))
         z = self.dropout(z)
-        return torch.sigmoid(self.out(z)).squeeze(-1)
+        return self.out(z).squeeze(-1) # Return raw logits for numerical stability
 
-# Exact Paper Adaptive Focal Loss (gamma=2.0, alpha=0.25)
-class BinaryFocalLoss(nn.Module):
-    def __init__(self, gamma=2.0, alpha=0.25):
-        super().__init__()
-        self.gamma = gamma
-        self.alpha = alpha
-
-    def forward(self, preds, targets):
-        bce = F.binary_cross_entropy(preds, targets, reduction='none')
-        p_t = targets * preds + (1 - targets) * (1 - preds)
-        alpha_t = targets * self.alpha + (1 - targets) * (1 - self.alpha)
-        focal_loss = alpha_t * (1 - p_t) ** self.gamma * bce
-        return focal_loss.mean()
-
-# DataLoaders
-if device.type == 'cuda':
-    train_dataset = PaperNYUDataset(tr_ax, tr_cor, tr_sag, tr_y, augment=True)
-    test_dataset = PaperNYUDataset(te_ax, te_cor, te_sag, te_y, augment=False)
-else:
-    train_dataset = PaperNYUDataset(X_ax_tr, X_cor_tr, X_sag_tr, y_tr, augment=True)
-    test_dataset = PaperNYUDataset(X_ax_te, X_cor_te, X_sag_te, y_te, augment=False)
+train_dataset = PaperNYUDataset(X_ax_tr, X_cor_tr, X_sag_tr, y_tr, augment=True)
+test_dataset = PaperNYUDataset(X_ax_te, X_cor_te, X_sag_te, y_te, augment=False)
 
 train_loader = DataLoader(train_dataset, batch_size=GLOBAL_BATCH_SIZE, shuffle=True, num_workers=0)
 test_loader = DataLoader(test_dataset, batch_size=GLOBAL_BATCH_SIZE, shuffle=False, num_workers=0)
 
 model = Hierarchical3DCNN().to(device)
-criterion = BinaryFocalLoss(gamma=2.0, alpha=0.25)
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-4)
+
+# Compute pos_weight to perfectly balance gradients between ASD and NC
+pos_weight = torch.tensor([(len(y_tr) - np.sum(y_tr)) / np.sum(y_tr)], device=device)
+criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-3)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
 
 best_test_acc = 0.0
@@ -279,9 +244,10 @@ for epoch in range(1, EPOCHS + 1):
     model.train()
     train_loss = 0.0
     for a, c, s, targets in train_loader:
+        a, c, s, targets = a.to(device), c.to(device), s.to(device), targets.to(device)
         optimizer.zero_grad()
-        outputs = model(a, c, s)
-        loss = criterion(outputs, targets)
+        logits = model(a, c, s)
+        loss = criterion(logits, targets)
         loss.backward()
         optimizer.step()
         train_loss += loss.item()
@@ -293,9 +259,11 @@ for epoch in range(1, EPOCHS + 1):
     test_preds, test_targets, test_probs = [], [], []
     with torch.no_grad():
         for a, c, s, targets in test_loader:
-            outputs = model(a, c, s)
-            test_probs.extend(outputs.cpu().numpy())
-            test_preds.extend((outputs > 0.5).cpu().numpy())
+            a, c, s, targets = a.to(device), c.to(device), s.to(device), targets.to(device)
+            logits = model(a, c, s)
+            probs = torch.sigmoid(logits)
+            test_probs.extend(probs.cpu().numpy())
+            test_preds.extend((probs > 0.5).cpu().numpy())
             test_targets.extend(targets.cpu().numpy())
             
     test_acc = accuracy_score(test_targets, test_preds)
