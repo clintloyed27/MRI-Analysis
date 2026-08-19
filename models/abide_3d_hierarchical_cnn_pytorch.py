@@ -239,6 +239,10 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(X_ax, y), 1):
     log(f"==========================================")
     
     if device.type == 'cuda':
+        gc.collect()
+        torch.cuda.empty_cache()
+    
+    if device.type == 'cuda':
         train_dataset = GPUsMRIDataset(GPU_X_ax[train_idx], GPU_X_cor[train_idx], GPU_X_sag[train_idx], GPU_y[train_idx], augment=True)
         val_dataset = GPUsMRIDataset(GPU_X_ax[val_idx], GPU_X_cor[val_idx], GPU_X_sag[val_idx], GPU_y[val_idx], augment=False)
     else:
