@@ -8,50 +8,47 @@ Replicating and adapting the methodology of **Hammash & Younis (2026)**, this re
 
 ## 📊 Preserved Benchmark Models & Preprocessing Pipelines
 
-| Model Script | Preprocessing Script | Dataset / Sites | Resolution | Peak Validation Accuracy |
-| :--- | :--- | :--- | :--- | :--- |
-| **[`models/abide_3d_hierarchical_cnn_pytorch.py`](models/abide_3d_hierarchical_cnn_pytorch.py)** | **[`preprocessing/abide_3d_preprocessing.py`](preprocessing/abide_3d_preprocessing.py)** | **Multi-Site (NYU + UM_1 + USM)** <br> $N=395$ Subjects | Full HD **`224x224`** | **`75.95%` (Fold 1 Peak)** 🔥 |
-| **[`models/abide_3d_hierarchical_cnn.py`](models/abide_3d_hierarchical_cnn.py)** | **[`preprocessing/abide_3d_preprocessing_nyu_128.py`](preprocessing/abide_3d_preprocessing_nyu_128.py)** | **Single-Site (NYU Alone)** <br> $N=184$ Subjects | Standard **`128x128`** | **`75.00%` (Fold 5 Peak)** 🌟 |
+| Model Script | Preprocessing Script | Target Cohort | Input Dimensions | Output Location | Benchmark Peak |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **[`models/abide_3d_hierarchical_cnn.py`](models/abide_3d_hierarchical_cnn.py)** | **[`preprocessing/abide_3d_preprocessing.py`](preprocessing/abide_3d_preprocessing.py)** | **NYU Site Alone** ($N=184$) | 50 Slices @ **`128x128`** | `./processed_paper_3D/` | **`75.00%` Peak** 🌟 |
+| **[`models/abide_3d_hierarchical_cnn_pytorch.py`](models/abide_3d_hierarchical_cnn_pytorch.py)** | **[`preprocessing/abide_3d_preprocessing.py`](preprocessing/abide_3d_preprocessing.py)** | **Multi-Site** ($N=395$) | 50 Slices @ **`224x224`** | `./processed_paper_3D_224/` | **`75.95%` Peak** 🔥 |
 
 ---
 
-## 🔬 Dataset Overview (ABIDE-I Multi-Site & NYU Cohorts)
+## 🔬 Dataset Overview (ABIDE-I NYU Cohort)
 
-* **Multi-Site Cohort (`NYU`, `UM_1`, `USM`):** $N = 395$ Total Subjects
-  * **Autism Spectrum Disorder (ASD):** 192 Subjects (48.6%)
-  * **Healthy Control (HC):** 203 Subjects (51.4%)
 * **Single-Site Cohort (`NYU` Alone):** $N = 184$ Total Subjects
   * **Autism Spectrum Disorder (ASD):** 79 Subjects (42.9%)
   * **Healthy Control (HC):** 105 Subjects (57.1%)
 
 ---
 
-## ⚙️ Preprocessing & Model Architectures
+## ⚙️ Preprocessing & Model Architecture
 
-### 1. Multi-Site Full HD Preprocessing (`preprocessing/abide_3d_preprocessing.py`)
-* **Otsu Adaptive Brain Masking:** Erases non-brain tissue, skull, and scalp fat.
-* **N4 Bias Field Correction:** Removes spatial magnetic field shading gradients.
-* **Site-Harmonized Z-Score Normalization:** Rescales voxel brightness per scan while aligning GE/Siemens contrast histograms.
-* **Multi-Planar 50-Slice Extraction:** Extracts 50 middle slices for Axial, Coronal, and Sagittal physical planes into 3D tensors `(50, 224, 224, 1)`.
-
-### 2. NYU Single-Site Preprocessing (`preprocessing/abide_3d_preprocessing_nyu_128.py`)
-* **Bounding Box Skull Stripping:** Crops empty background space around brain tissue.
+### 1. NYU 128x128 Preprocessing (`preprocessing/abide_3d_preprocessing.py`)
+* **AWS S3 Automated Downloader:** Pulls raw NIfTI scans for the NYU cohort.
+* **Bounding Box Skull Stripping:** Detects non-zero voxel intensity coordinates to crop empty background space around brain tissue.
 * **Z-Score Normalization:** Rescales voxel brightness to $[-3\sigma, +3\sigma]$.
-* **Multi-Planar 50-Slice Extraction:** Extracts 50 middle slices into `(50, 128, 128, 1)` tensors.
+* **Multi-Planar 50-Slice Tensor Extractor:** Extracts 50 middle slices for Axial, Coronal, and Sagittal physical planes into 3D tensors `(50, 128, 128, 1)`.
+* **Output Destination:** Saves 3D arrays to `./processed_paper_3D/`.
+
+### 2. Keras 3D Conv3D Model (`models/abide_3d_hierarchical_cnn.py`)
+* **3-Stream Parallel Backbone:** Axial, Coronal, and Sagittal 3D feature extractors.
+* **Alternating Kernels:** $3\times3\times3$ and $5\times5\times5$ 3D Conv blocks with residual skip connections.
+* **3D CBAM Attention:** Channel & 3D Spatial Attention modules.
+* **Adaptive Focal Loss:** $\gamma=2.0, \alpha=0.25$.
 
 ---
 
 ## 🚀 How to Run
 
-### Pipeline A: Multi-Site PyTorch 3D Model (Peak 75.95%)
+### Step 1: Run Preprocessing
 ```bash
 python preprocessing/abide_3d_preprocessing.py
-python models/abide_3d_hierarchical_cnn_pytorch.py
 ```
 
-### Pipeline B: NYU Single-Site Keras 3D Model (Peak 75.00%)
+### Step 2: Run 3D Model Training
 ```bash
-python preprocessing/abide_3d_preprocessing_nyu_128.py
 python models/abide_3d_hierarchical_cnn.py
 ```
 
@@ -61,15 +58,17 @@ python models/abide_3d_hierarchical_cnn.py
 
 ```text
 MRI-Analysis/
+├── data/
+│   └── ABIDE_Phenotypic.csv                # Official ABIDE-I phenotypic metadata table
 ├── preprocessing/
-│   ├── abide_3d_preprocessing.py            # Multi-site Full HD 224x224 3D tensor extractor (NYU+UM_1+USM)
-│   └── abide_3d_preprocessing_nyu_128.py    # NYU Single-site 128x128 3D tensor extractor (NYU)
+│   └── abide_3d_preprocessing.py           # 128x128 3D tensor extraction pipeline (outputs to ./processed_paper_3D/)
 ├── models/
-│   ├── abide_3d_hierarchical_cnn_pytorch.py # Multi-site PyTorch 3D Conv3D CBAM Model (Peak: 75.95%)
-│   └── abide_3d_hierarchical_cnn.py         # NYU Single-site 3D Conv3D CBAM Model (Peak: 75.00%)
+│   ├── abide_3d_hierarchical_cnn.py        # Keras 3D Conv3D CBAM Model (NYU 128x128)
+│   ├── abide_3d_hierarchical_cnn_pytorch.py# PyTorch 3D Conv3D CBAM Model (Multi-Site)
+│   └── abide_3d_nyu_master.py              # Single-site NYU PyTorch Master Model
 ├── report/
 │   └── 3D_MultiPlanar_ASD_Research_Report.md# Complete research report & methodology
-└── README.md                                # Repository documentation
+└── README.md                               # Repository documentation
 ```
 
 ---
