@@ -36,7 +36,10 @@ os.makedirs(output_dir, exist_ok=True)
 # 1. Dataset Acquisition (Multi-Site Expansion: NYU, UM_1, USM)
 TARGET_SITES = ['NYU', 'UM_1', 'USM']
 print(f"📊 Fetching Official ABIDE Phenotypic Metadata for Sites: {TARGET_SITES}...")
-csv_url = "https://s3.amazonaws.com/fcp-indi/data/Projects/ABIDE_Initiative/Phenotypic_V1_0b_preprocessed1.csv"
+if os.path.exists('./data/ABIDE_Phenotypic.csv'):
+    csv_url = './data/ABIDE_Phenotypic.csv'
+else:
+    csv_url = "https://s3.amazonaws.com/fcp-indi/data/Projects/ABIDE_Initiative/Phenotypic_V1_0b_preprocessed1.csv"
 df = pd.read_csv(csv_url)
 nyu_df = df[df['SITE_ID'].isin(TARGET_SITES)].copy()
 nyu_df['PADDED_ID'] = nyu_df['SUB_ID'].astype(str).str.zfill(7)

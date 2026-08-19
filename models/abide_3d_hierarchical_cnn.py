@@ -47,7 +47,9 @@ GLOBAL_BATCH_SIZE = 8
 EPOCHS = 50
 
 # Cross-Platform Output Directory Configuration
-if os.path.exists('/kaggle/working'):
+if os.path.exists('./data/ABIDE_Phenotypic.csv'):
+    phenotype_csv = './data/ABIDE_Phenotypic.csv'
+elif os.path.exists('/kaggle/working'):
     base_dir = '/kaggle/working/'
     phenotype_csv = '/kaggle/input/datasets/clintloyed/abide-autism-10x-data/ABIDE_Phenotypic.csv'
 else:
