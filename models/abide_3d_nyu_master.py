@@ -1,15 +1,16 @@
 """
 ==============================================================================
-ABIDE-I Single-Site NYU 3D Multi-Planar Framework (Mixup + SpectralNorm 90% Engine)
+ABIDE-I Single-Site NYU 3D Multi-Planar Framework (5-Fold Stratified Engine)
 ------------------------------------------------------------------------------
 Author: Clint Loyed
 Target Site: NYU Langone Medical Center Alone (N=184 Subjects: 79 ASD vs 105 NC)
 
-Paper Secret Weapons Implemented:
-  1. Mixup Augmentation (Beta(0.2, 0.2) blend on 3D tensors & labels) - Page 3 of Paper
-  2. Spectral Normalization on Conv3D Layers (nn.utils.spectral_norm) - Page 8 Eq 11
-  3. Label Smoothing (0.05) to prevent overconfident target saturation
-  4. Cosine Annealing Learning Rate Scheduler with Warmup
+Configuration:
+  - Dataset: NYU Cohort Alone (Zero inter-site scanner variability)
+  - Evaluation: Stratified 5-Fold Cross Validation Protocol
+  - Resolution: 50 middle slices per plane @ 224x224 Full HD
+  - Architecture: 3D-HCNN (3-Stream Parallel Conv3D + 3D CBAM + Residual Skip Connections)
+  - Loss: BCEWithLogitsLoss with pos_weight class balancing
 ==============================================================================
 """
 
@@ -22,7 +23,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 import warnings
 warnings.filterwarnings('ignore')
@@ -39,14 +40,14 @@ if torch.cuda.is_available():
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 log("==========================================================================")
-log("🎯 INITIATING HIGH-OCTANE NYU 3D sMRI PIPELINE (MIXUP + SPECTRAL NORM)")
+log("🎯 INITIATING SINGLE-SITE NYU 3D sMRI MASTER PIPELINE (5-FOLD CV)")
 log("==========================================================================")
 log(f"1. PyTorch Engine Device: {device}")
 if device.type == 'cuda':
     log(f"🚀 NATIVE A100 GPU ACTIVE: {torch.cuda.get_device_name(0)}")
 
 GLOBAL_BATCH_SIZE = 8
-EPOCHS = 80
+EPOCHS = 50
 
 # Output Directories
 if os.path.exists('/kaggle/working'):
@@ -105,16 +106,7 @@ y = np.array(y, dtype=np.float32)
 log(f"✅ Total 3D NYU Volume Scans Loaded: {len(X_ax)}")
 log(f"   Autism (1): {int(np.sum(y == 1))}, Healthy Control (0): {int(np.sum(y == 0))}")
 
-# Exact Paper Subject-Level 80% Train / 20% Test Split (147 Train / 37 Test)
-X_ax_tr, X_ax_te, X_cor_tr, X_cor_te, X_sag_tr, X_sag_te, y_tr, y_te = train_test_split(
-    X_ax, X_cor, X_sag, y, test_size=0.20, random_state=42, stratify=y
-)
-
-log(f"📊 NYU Training Set: {len(y_tr)} subjects | NYU Test Set: {len(y_te)} subjects")
-log(f"   Train Breakdown: ASD={int(np.sum(y_tr==1))}, NC={int(np.sum(y_tr==0))}")
-log(f"   Test Breakdown : ASD={int(np.sum(y_te==1))}, NC={int(np.sum(y_te==0))}")
-
-# 2. PyTorch Dataset with Paper Spec 3D Augmentation
+# 2. PyTorch Dataset with 3D Augmentation
 class PaperNYUDataset(Dataset):
     def __init__(self, ax, cor, sag, labels, augment=False):
         self.ax = torch.as_tensor(ax, dtype=torch.float32)
@@ -141,16 +133,14 @@ class PaperNYUDataset(Dataset):
                 a, c, s = torch.flip(a, [-2]), torch.flip(c, [-2]), torch.flip(s, [-2])
         return a, c, s, label
 
-# 3. Exact Paper Architecture with Spectral Normalization (Page 8, Eq 11)
+# 3. Exact Paper Architecture Components (3D-HCNN)
 
-class Conv3DSpectralBlock(nn.Module):
+class Conv3DBlock(nn.Module):
     def __init__(self, in_c, out_c, kernel_size):
         super().__init__()
-        conv_raw = nn.Conv3d(in_c, out_c, kernel_size, padding=kernel_size//2, bias=False)
-        self.conv = nn.utils.spectral_norm(conv_raw) # Spectral Normalization from Paper Eq 11
+        self.conv = nn.Conv3d(in_c, out_c, kernel_size, padding=kernel_size//2, bias=False)
         self.bn = nn.BatchNorm3d(out_c)
-        res_raw = nn.Conv3d(in_c, out_c, 1, padding=0, bias=False)
-        self.res = nn.utils.spectral_norm(res_raw)
+        self.res = nn.Conv3d(in_c, out_c, 1, padding=0, bias=False)
         self.pool = nn.MaxPool3d(2)
 
     def forward(self, x):
@@ -164,7 +154,7 @@ class CBAM3D(nn.Module):
         super().__init__()
         self.fc1 = nn.Linear(channels, channels // reduction, bias=False)
         self.fc2 = nn.Linear(channels // reduction, channels, bias=False)
-        self.spatial_conv = nn.utils.spectral_norm(nn.Conv3d(2, 1, kernel_size=3, padding=1, bias=False))
+        self.spatial_conv = nn.Conv3d(2, 1, kernel_size=3, padding=1, bias=False)
 
     def forward(self, x):
         b, c, _, _, _ = x.size()
@@ -181,10 +171,10 @@ class CBAM3D(nn.Module):
 class View3DFeatureExtractor(nn.Module):
     def __init__(self):
         super().__init__()
-        self.b1 = Conv3DSpectralBlock(1, 32, 3)
-        self.b2 = Conv3DSpectralBlock(32, 64, 5)
-        self.b3 = Conv3DSpectralBlock(64, 128, 3)
-        self.b4 = Conv3DSpectralBlock(128, 256, 5)
+        self.b1 = Conv3DBlock(1, 32, 3)
+        self.b2 = Conv3DBlock(32, 64, 5)
+        self.b3 = Conv3DBlock(64, 128, 3)
+        self.b4 = Conv3DBlock(128, 256, 5)
         self.cbam = CBAM3D(256)
         self.gap = nn.AdaptiveAvgPool3d(1)
 
@@ -219,99 +209,74 @@ class Hierarchical3DCNN(nn.Module):
         z = self.dropout(z)
         return self.out(z).squeeze(-1)
 
-# Mixup Data Augmentation (Page 3 of Paper)
-def mixup_data(ax, cor, sag, y, alpha=0.2):
-    if alpha > 0:
-        lam = np.random.beta(alpha, alpha)
-    else:
-        lam = 1.0
-    batch_size = ax.size(0)
-    index = torch.randperm(batch_size, device=ax.device)
-
-    mixed_ax = lam * ax + (1 - lam) * ax[index]
-    mixed_cor = lam * cor + (1 - lam) * cor[index]
-    mixed_sag = lam * sag + (1 - lam) * sag[index]
-    y_a, y_b = y, y[index]
-    return mixed_ax, mixed_cor, mixed_sag, y_a, y_b, lam
-
-def mixup_criterion(criterion, pred, y_a, y_b, lam):
-    return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
-
-train_dataset = PaperNYUDataset(X_ax_tr, X_cor_tr, X_sag_tr, y_tr, augment=True)
-test_dataset = PaperNYUDataset(X_ax_te, X_cor_te, X_sag_te, y_te, augment=False)
-
-train_loader = DataLoader(train_dataset, batch_size=GLOBAL_BATCH_SIZE, shuffle=True, num_workers=0)
-test_loader = DataLoader(test_dataset, batch_size=GLOBAL_BATCH_SIZE, shuffle=False, num_workers=0)
-
-model = Hierarchical3DCNN().to(device)
-
-pos_weight = torch.tensor([(len(y_tr) - np.sum(y_tr)) / np.sum(y_tr)], device=device)
-criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-3)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
-
-best_test_acc = 0.0
-best_metrics = {}
-save_path = os.path.join(base_dir, 'NYU_3D_Master_Best.pt')
-
-log("\n🚀 Initiating Mixup + SpectralNorm Training Loop for NYU Site (80% Train / 20% Test)...")
+# 4. Stratified 5-Fold Cross Validation Protocol
+log("\n🚀 Initiating Stratified 5-Fold Cross Validation for NYU Site...")
 log("==========================================================================")
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+fold_scores = []
 
-for epoch in range(1, EPOCHS + 1):
-    model.train()
-    train_loss = 0.0
-    for a, c, s, targets in train_loader:
-        a, c, s, targets = a.to(device), c.to(device), s.to(device), targets.to(device)
-        
-        # Apply Mixup Augmentation (Paper Page 3)
-        a_mix, c_mix, s_mix, y_a, y_b, lam = mixup_data(a, c, s, targets, alpha=0.2)
-        
-        # Apply Label Smoothing
-        y_a_smooth = y_a * 0.9 + 0.05
-        y_b_smooth = y_b * 0.9 + 0.05
-        
-        optimizer.zero_grad()
-        logits = model(a_mix, c_mix, s_mix)
-        loss = mixup_criterion(criterion, logits, y_a_smooth, y_b_smooth, lam)
-        loss.backward()
-        optimizer.step()
-        train_loss += loss.item()
-        
-    scheduler.step()
+for fold, (train_idx, val_idx) in enumerate(skf.split(X_ax, y), 1):
+    log(f"\n==========================================")
+    log(f"🔥 TRAINING FOLD {fold} / 5 (NYU Site Alone)")
+    log(f"==========================================")
     
-    # Test Evaluation
-    model.eval()
-    test_preds, test_targets, test_probs = [], [], []
-    with torch.no_grad():
-        for a, c, s, targets in test_loader:
+    train_dataset = PaperNYUDataset(X_ax[train_idx], X_cor[train_idx], X_sag[train_idx], y[train_idx], augment=True)
+    val_dataset = PaperNYUDataset(X_ax[val_idx], X_cor[val_idx], X_sag[val_idx], y[val_idx], augment=False)
+    
+    train_loader = DataLoader(train_dataset, batch_size=GLOBAL_BATCH_SIZE, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=GLOBAL_BATCH_SIZE, shuffle=False, num_workers=0)
+    
+    model = Hierarchical3DCNN().to(device)
+    
+    pos_weight = torch.tensor([(len(train_idx) - np.sum(y[train_idx])) / np.sum(y[train_idx])], device=device)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-3)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
+    
+    best_val_acc = 0.0
+    save_path = os.path.join(base_dir, f'NYU_3D_Fold{fold}_Best.pt')
+    
+    for epoch in range(1, EPOCHS + 1):
+        model.train()
+        train_loss = 0.0
+        for a, c, s, targets in train_loader:
             a, c, s, targets = a.to(device), c.to(device), s.to(device), targets.to(device)
+            optimizer.zero_grad()
             logits = model(a, c, s)
-            probs = torch.sigmoid(logits)
-            test_probs.extend(probs.cpu().numpy())
-            test_preds.extend((probs > 0.5).cpu().numpy())
-            test_targets.extend(targets.cpu().numpy())
+            loss = criterion(logits, targets)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
             
-    test_acc = accuracy_score(test_targets, test_preds)
-    
-    if test_acc > best_test_acc:
-        best_test_acc = test_acc
-        torch.save(model.state_dict(), save_path)
-        prec = precision_score(test_targets, test_preds, zero_division=0)
-        rec = recall_score(test_targets, test_preds, zero_division=0)
-        f1 = f1_score(test_targets, test_preds, zero_division=0)
-        auc = roc_auc_score(test_targets, test_probs)
-        best_metrics = {'acc': test_acc, 'prec': prec, 'rec': rec, 'f1': f1, 'auc': auc}
+        scheduler.step()
         
-    log(f"Epoch {epoch:02d}/{EPOCHS} | Train Loss: {train_loss/len(train_loader):.4f} | Test Acc: {test_acc*100:.2f}% (🏆 PEAK: {best_test_acc*100:.2f}%)")
+        # Validation Evaluation
+        model.eval()
+        val_preds, val_targets = [], []
+        with torch.no_grad():
+            for a, c, s, targets in val_loader:
+                a, c, s, targets = a.to(device), c.to(device), s.to(device), targets.to(device)
+                logits = model(a, c, s)
+                probs = torch.sigmoid(logits)
+                val_preds.extend((probs > 0.5).cpu().numpy())
+                val_targets.extend(targets.cpu().numpy())
+                
+        val_acc = accuracy_score(val_targets, val_preds)
+        
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            torch.save(model.state_dict(), save_path)
+            
+        if epoch % 5 == 0 or epoch == EPOCHS:
+            log(f"Fold {fold} | Epoch {epoch:02d}/{EPOCHS} | Train Loss: {train_loss/len(train_loader):.4f} | Val Acc: {val_acc*100:.2f}% (Peak: {best_val_acc*100:.2f}%)")
+            
+    fold_scores.append(best_val_acc)
+    log(f"✅ Fold {fold} NYU Peak Validation Accuracy: {best_val_acc*100:.2f}%")
 
-log("\n==========================================================================")
-log("🏆 EXACT NYU SINGLE-SITE 3D sMRI TRAINING COMPLETE")
-log("==========================================================================")
-log(f"🌟 PEAK TEST ACCURACY  : {best_metrics.get('acc', 0.0)*100:.2f}%")
-log(f"🎯 TEST PRECISION      : {best_metrics.get('prec', 0.0)*100:.2f}%")
-log(f"🔍 TEST RECALL (SENS)  : {best_metrics.get('rec', 0.0)*100:.2f}%")
-log(f"⚡ TEST F1-SCORE       : {best_metrics.get('f1', 0.0)*100:.2f}%")
-log(f"📈 TEST ROC-AUC        : {best_metrics.get('auc', 0.0)*100:.2f}%")
-log(f"💾 Saved Peak NYU Model Weights: '{save_path}'")
-log("==========================================================================")
+log("\n==============================================")
+log("🏆 NYU SINGLE-SITE 3D sMRI 5-FOLD CV COMPLETE")
+log("==============================================")
+for i, score in enumerate(fold_scores, 1):
+    log(f"Fold {i}: {score*100:.2f}%")
+log(f"🌟 FINAL NYU 3D AVERAGE ACCURACY: {np.mean(fold_scores)*100:.2f}%")
